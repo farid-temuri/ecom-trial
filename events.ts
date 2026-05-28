@@ -19,11 +19,25 @@ export type TrialEvent =
       ts: number;
     }
   | {
+      type: "bootstrap";
+      taskId: string;
+      tool: string;
+      input: unknown;
+      output: string;
+      outputBytes: number;
+      ok: boolean;
+      errorMessage?: string;
+      ts: number;
+    }
+  | {
       type: "step";
       taskId: string;
       step: number;
       tool: string;
       planFirst: string;
+      input: unknown;
+      output: string;
+      outputBytes: number;
       latencyMs: number;
       ok: boolean;
       errorMessage?: string;
@@ -35,6 +49,16 @@ export type TrialEvent =
       scoreAvailable: boolean;
       score?: number;
       scoreDetail: string[];
+      ts: number;
+    }
+  | {
+      type: "judge";
+      taskId: string;
+      attempt: number;
+      ok: boolean;
+      reason?: string;
+      proposedOutcome?: string;
+      latencyMs: number;
       ts: number;
     }
   | {

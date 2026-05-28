@@ -12,6 +12,8 @@ const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY ?? "";
 const DRAFT_MODEL = process.env.DRAFT_MODEL ?? process.env.MODEL_ID ?? "z-ai/glm-5.1";
 
+console.log(DRAFT_MODEL);
+
 const HTML = `<!doctype html>
 <html lang="en">
 <head>

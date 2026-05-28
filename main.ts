@@ -8,6 +8,13 @@ import { runAgent } from "./agent";
 import { bus } from "./events";
 import { startWebServer } from "./web";
 import { loadHints, makeRunId, openRunWriter } from "./logs";
+import {
+  loadState,
+  updateTaskState,
+  persistState,
+  selectTasks,
+  computeSummary,
+} from "./tasksStateIO";
 
 const BITGN_URL =
   process.env.BITGN_HOST ?? process.env.BENCHMARK_HOST ?? "https://api.bitgn.com";
@@ -16,6 +23,28 @@ const BENCH_ID = process.env.BENCH_ID ?? process.env.BENCHMARK_ID ?? "bitgn/ecom
 const MODEL_ID = process.env.MODEL_ID ?? "z-ai/glm-5.1";
 const MAX_TASKS = process.env.MAX_TASKS ? Number(process.env.MAX_TASKS) : Infinity;
 const WEB_PORT = process.env.WEB_PORT ? Number(process.env.WEB_PORT) : 3000;
+const CONCURRENCY = Math.max(
+  1,
+  process.env.CONCURRENCY ? Number(process.env.CONCURRENCY) : 1,
+);
+
+class Semaphore {
+  private waiters: Array<() => void> = [];
+  constructor(private available: number) {}
+  async acquire(): Promise<void> {
+    if (this.available > 0) {
+      this.available--;
+      return;
+    }
+    await new Promise<void>((resolve) => this.waiters.push(resolve));
+    this.available--;
+  }
+  release(): void {
+    this.available++;
+    const next = this.waiters.shift();
+    if (next) next();
+  }
+}
 
 const CLI = {
   red: "\x1B[31m",
@@ -28,8 +57,58 @@ function policyName(p: EvalPolicy): string {
   return EvalPolicy[p] ?? `EvalPolicy(${p})`;
 }
 
+const SCORE_POLL_TIMEOUT_MS = process.env.SCORE_POLL_TIMEOUT_MS
+  ? Number(process.env.SCORE_POLL_TIMEOUT_MS)
+  : 5 * 60 * 1000;
+const SCORE_POLL_INITIAL_DELAY_MS = 3000;
+const SCORE_POLL_MAX_DELAY_MS = 15000;
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+async function batchFetchScores(
+  client: ReturnType<typeof createClient<typeof HarnessService>>,
+  runId: string,
+): Promise<Array<[string, number]>> {
+  const start = Date.now();
+  let delay = SCORE_POLL_INITIAL_DELAY_MS;
+  let attempt = 0;
+  while (Date.now() - start < SCORE_POLL_TIMEOUT_MS) {
+    attempt++;
+    try {
+      const r = await client.getRun({ runId });
+      const scoredTrials = r.trials.filter(
+        (t) => t.scoreAvailable && typeof t.score === "number",
+      );
+      const elapsed = Math.round((Date.now() - start) / 1000);
+      console.log(
+        `  [poll ${attempt}] scored ${scoredTrials.length}/${r.trials.length} (runScoreAvailable=${r.scoreAvailable}, elapsed=${elapsed}s)`,
+      );
+      if (r.scoreAvailable || scoredTrials.length === r.trials.length) {
+        return scoredTrials.map((t) => [t.taskId, t.score as number]);
+      }
+    } catch (err) {
+      console.error(`  [poll ${attempt}] getRun error:`, err);
+    }
+    await sleep(delay);
+    delay = Math.min(Math.floor(delay * 1.5), SCORE_POLL_MAX_DELAY_MS);
+  }
+  console.log(
+    `score-poll timed out after ${Math.round((Date.now() - start) / 1000)}s — returning whatever landed`,
+  );
+  try {
+    const r = await client.getRun({ runId });
+    return r.trials
+      .filter((t) => t.scoreAvailable && typeof t.score === "number")
+      .map((t) => [t.taskId, t.score as number]);
+  } catch {
+    return [];
+  }
+}
+
 async function main(): Promise<void> {
-  const taskFilter = new Set(process.argv.slice(2));
+  const argvFilter = new Set(process.argv.slice(2));
+  const taskStateMap = loadState();
   const scores: Array<[string, number]> = [];
 
   const web = WEB_PORT > 0 ? startWebServer(WEB_PORT) : null;
@@ -67,55 +146,140 @@ async function main(): Promise<void> {
     });
 
     const run = await client.startRun({
-      name: "ECOM TypeScript Sample",
+      name: "Claude Popusk 6.7 EXTRA LOW",
       benchmarkId: BENCH_ID,
       apiKey: BITGN_API_KEY,
     });
 
-    try {
-      let executed = 0;
-      for (const trialId of run.trialIds) {
-        if (executed >= MAX_TASKS) break;
-        const trial = await client.startTrial({ trialId });
-        if (taskFilter.size > 0 && !taskFilter.has(trial.taskId)) continue;
-        executed++;
-
-        console.log(`${"=".repeat(30)} Starting task: ${trial.taskId} ${"=".repeat(30)}`);
-        console.log(`${CLI.blue}${trial.instruction}${CLI.clr}\n${"-".repeat(80)}`);
-        bus.emit({
-          type: "trial:start",
-          taskId: trial.taskId,
-          trialId: trial.trialId,
-          instruction: trial.instruction,
-          ts: Date.now(),
-        });
-        try {
-          await runAgent(MODEL_ID, trial.harnessUrl, trial.instruction, trial.taskId);
-        } catch (err) {
-          console.error(err);
-        }
-
-        const result = await client.endTrial({ trialId: trial.trialId });
-        if (result.scoreAvailable) {
-          const score = result.score ?? 0;
-          scores.push([trial.taskId, score]);
-          const style = score === 1 ? CLI.green : CLI.red;
-          const explain = result.scoreDetail.map((s) => `  ${s}`).join("\n");
-          console.log(`\n${style}Score: ${score.toFixed(2)}\n${explain}\n${CLI.clr}`);
-        } else {
-          console.log(`\n${CLI.blue}Score: not available${CLI.clr}\n`);
-        }
-        bus.emit({
-          type: "trial:end",
-          taskId: trial.taskId,
-          scoreAvailable: result.scoreAvailable,
-          score: result.score,
-          scoreDetail: result.scoreDetail,
-          ts: Date.now(),
-        });
+    // Ctrl-C handler: force-submit the run so in-flight trials are recorded
+    // (forfeited as 0) and the run isn't left orphaned. Scores for completed
+    // trials are preserved by BitGN — recover via `bun run finalizeRun.ts <runId>`.
+    let cleaningUp = false;
+    const onSignal = (sig: string): void => {
+      if (cleaningUp) {
+        console.log(`\n${sig} again — hard exit`);
+        process.exit(130);
       }
+      cleaningUp = true;
+      console.log(
+        `\n${sig} received — force-submitting run ${run.runId} (in-flight trials forfeit). Scores landed so far are preserved.`,
+      );
+      void (async () => {
+        try {
+          await client.submitRun({ runId: run.runId, force: true });
+          console.log(`Submitted. Recover scores: bun run finalizeRun.ts ${run.runId}`);
+        } catch (err) {
+          console.error("submitRun on signal failed:", err);
+        } finally {
+          process.exit(130);
+        }
+      })();
+    };
+    process.on("SIGINT", () => onSignal("SIGINT"));
+    process.on("SIGTERM", () => onSignal("SIGTERM"));
+
+    try {
+      const sem = new Semaphore(CONCURRENCY);
+      let executed = 0;
+      console.log(`${CLI.blue}Concurrency: ${CONCURRENCY}${CLI.clr}`);
+
+      const shouldRunTask = (taskId: string): boolean => {
+        if (argvFilter.size > 0) return argvFilter.has(taskId);
+        const s = taskStateMap[taskId];
+        return !s || s.enabled;
+      };
+
+      const trialJobs = run.trialIds.map((trialId) => async () => {
+        await sem.acquire();
+        try {
+          const trial = await client.startTrial({ trialId });
+          if (executed >= MAX_TASKS || !shouldRunTask(trial.taskId)) {
+            // CRITICAL: must endTrial even when skipping — leaving trials open
+            // makes BitGN reject submitRun. We don't update tasksState here
+            // (preserves lastScore for tasks we chose not to re-run).
+            const reason =
+              executed >= MAX_TASKS
+                ? `MAX_TASKS=${MAX_TASKS} cap reached`
+                : "disabled in tasksState.ts";
+            console.log(`${CLI.blue}[${trial.taskId}] closing trial (${reason})${CLI.clr}`);
+            try {
+              await client.endTrial({ trialId: trial.trialId });
+            } catch (err) {
+              console.error(`[${trial.taskId}] endTrial-on-skip failed:`, err);
+            }
+            return;
+          }
+          executed++;
+          const tag = `[${trial.taskId}]`;
+
+          console.log(`${"=".repeat(20)} ${tag} START ${"=".repeat(20)}`);
+          console.log(`${CLI.blue}${tag} ${trial.instruction}${CLI.clr}`);
+          bus.emit({
+            type: "trial:start",
+            taskId: trial.taskId,
+            trialId: trial.trialId,
+            instruction: trial.instruction,
+            ts: Date.now(),
+          });
+          try {
+            await runAgent(MODEL_ID, trial.harnessUrl, trial.instruction, trial.taskId);
+          } catch (err) {
+            console.error(tag, err);
+          }
+
+          const endRes = await client.endTrial({ trialId: trial.trialId });
+          // Score is fetched in bulk after the whole run is submitted — see
+          // batchFetchScores below. Per-trial polling here blocks sem slots
+          // and serializes everyone behind scoring latency.
+          bus.emit({
+            type: "trial:end",
+            taskId: trial.taskId,
+            scoreAvailable: endRes.scoreAvailable,
+            score: endRes.score,
+            scoreDetail: endRes.scoreDetail,
+            ts: Date.now(),
+          });
+          console.log(`${CLI.blue}${tag} agent done (scoring deferred)${CLI.clr}`);
+        } finally {
+          sem.release();
+        }
+      });
+
+      await Promise.all(trialJobs.map((job) => job()));
+      console.log(`${CLI.blue}All trials closed — submitting run for grading${CLI.clr}`);
     } finally {
-      await client.submitRun({ runId: run.runId, force: true });
+      // force=false: only submits if all trials are terminal (DONE/ERROR).
+      // If any trial slipped through unclosed, retry with force=true as a
+      // backstop so we don't leave the run orphaned.
+      try {
+        await client.submitRun({ runId: run.runId, force: false });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes("unfinished trials")) {
+          console.error(
+            `submitRun(force=false) refused — unfinished trials. Retrying with force=true (in-flight forfeit).`,
+          );
+          try {
+            await client.submitRun({ runId: run.runId, force: true });
+          } catch (err2) {
+            console.error("submitRun(force=true) also failed:", err2);
+          }
+        } else {
+          console.error("submitRun failed:", err);
+        }
+      }
+    }
+
+    console.log(`${CLI.blue}Fetching scores for run ${run.runId}${CLI.clr}`);
+    const fetched = await batchFetchScores(client, run.runId);
+    for (const [taskId, score] of fetched) {
+      scores.push([taskId, score]);
+      updateTaskState(taskStateMap, taskId, score, new Date().toISOString());
+    }
+    try {
+      await persistState(taskStateMap);
+    } catch (err) {
+      console.error("failed to persist tasksState:", err);
     }
   } catch (err) {
     if (err instanceof ConnectError) {
@@ -127,12 +291,23 @@ async function main(): Promise<void> {
 
   let finalPct: number | undefined;
   if (scores.length > 0) {
+    scores.sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }));
     for (const [taskId, score] of scores) {
       const style = score === 1 ? CLI.green : CLI.red;
       console.log(`${taskId}: ${style}${score.toFixed(2)}${CLI.clr}`);
     }
-    finalPct = (scores.reduce((acc, [, s]) => acc + s, 0) / scores.length) * 100;
-    console.log(`FINAL: ${finalPct.toFixed(2)}%`);
+    const executedIds = new Set(scores.map(([id]) => id));
+    const skipped = Object.keys(taskStateMap).filter((id) => !executedIds.has(id));
+    const summary = computeSummary(scores, taskStateMap, skipped);
+    finalPct = summary.executedPct;
+    console.log(
+      `FINAL (this run, ${summary.executedCount} executed): ${summary.executedPct.toFixed(2)}%`,
+    );
+    if (skipped.length > 0) {
+      console.log(
+        `FULL (last-known scores over ${summary.totalCount} tasks): ${summary.totalPct.toFixed(2)}%`,
+      );
+    }
   }
   bus.emit({ type: "run:end", finalPct, ts: Date.now() });
   unsubscribe();
