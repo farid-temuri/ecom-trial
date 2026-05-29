@@ -42,6 +42,15 @@ To browse past runs without starting a new benchmark:
 bun run scripts/web.ts          # boots the web UI standalone on $WEB_PORT (default 3000)
 ```
 
+## Tests
+
+```sh
+bun test          # unit + mocked-integration suite — no network, no API keys
+bun run typecheck # tsc --noEmit
+```
+
+The suite covers the pure logic (gates, parsing, formatting, config), the harness factory, and the full `runAgent` loop driven against an injected fake `vm` + scripted `llm` (see [src/test-helpers.ts](src/test-helpers.ts)). The system prompt is hash-locked by [src/prompt.test.ts](src/prompt.test.ts) — if you edit the prompt, update its expected hash in the same commit. End-to-end validation still happens by running against the BitGN harness.
+
 When the run finishes you'll see per-task scores, the grader's per-trial detail (e.g. `answer missing required reference '/proc/catalog/X.json'`), and a final percentage. The full event log is saved to `runs/<runId>.jsonl`.
 
 ### Signal handling
@@ -68,12 +77,9 @@ bun run finalizeRun.ts <runId>   # read-only; pulls scores via getRun and update
 | `HINT` | — | Appended to the system prompt after `hints/system.md`. |
 | `OPENROUTER_TIMEOUT_MS` | `90000` | Per-request timeout. Retried on 408/425/429/5xx with exponential backoff. |
 | `SCORE_POLL_TIMEOUT_MS` | `300000` | Max time to poll `getRun` for deferred scores after submission. |
-| `JUDGE_ENABLED` | `true` | Pre-submission LLM judge gate. Set `false` to skip. |
-| `JUDGE_MODEL` | `MODEL_ID` | Model used for the judge. |
 | `REASONING_EFFORT` | `medium` | OpenRouter `reasoning.effort` passed on agent calls (`low` / `medium` / `high` / `off`). Silently ignored by non-reasoning models. |
-| `JUDGE_REASONING_EFFORT` | `low` | Same setting for the pre-submission judge — kept cheap by default. |
 | `WEB_PORT` | `3000` | `0` to disable the web UI. |
-| `FEAT_*` / `CITING_REASONING` / `STRUCTURED_FACTS` | `false` | Experimental harness behavior flags. See [docs/FEATURES.md](docs/FEATURES.md). |
+| `FEAT_*` flags | `false` | Experimental harness behavior flags, parsed in [src/config.ts](src/config.ts). Canonical names: `FEAT_LAZY_MD`, `FEAT_AUTO_CITE`, `FEAT_STRICT_REFS`, `FEAT_CITING_REASONING`, `FEAT_STRUCTURED_FACTS`, `FEAT_REFS_WHY_CANONICAL`, `FEAT_DEBUG_REF_PROBE`. `CITING_REASONING` and `STRUCTURED_FACTS` are accepted as back-compat aliases. "On" = `true`/`1`/`on`/`yes`. See [docs/FEATURES.md](docs/FEATURES.md). |
 
 ## tasksState.ts
 
@@ -91,7 +97,14 @@ Per-task control file. Flip `enabled: false` to skip a task on the next run with
 ## Project layout
 
 - [main.ts](main.ts) — control plane: BitGN harness, run lifecycle, concurrency, score polling (with grader detail capture via `getTrial`), signal handlers.
-- [agent.ts](agent.ts) — per-trial reasoning loop: calls OpenRouter, executes the model's JS in a Bun sandbox against the ECOM runtime, logs reasoning + scratchpad per step.
+- [src/](src/) — the per-trial runtime, decomposed into focused, individually-tested modules (the former monolithic `agent.ts`):
+  - [src/loop.ts](src/loop.ts) — `runAgent`: the per-trial reasoning loop, no-answer gate, `scratchpad.cite` injection. Accepts an optional `deps` object (`{ config, llm, makeVm, emit }`) defaulting to production — the seam the tests inject through.
+  - [src/config.ts](src/config.ts) — typed `Config`/`Features` from env. **Single source of truth for feature flags.**
+  - [src/gates.ts](src/gates.ts) — the submission gates as pure functions (`runSubmissionGates`).
+  - [src/harness.ts](src/harness.ts) — typed wrapper/factory over the `EcomRuntime` RPC.
+  - [src/openrouter.ts](src/openrouter.ts) — typed OpenRouter client + retry/backoff.
+  - [src/prompt.ts](src/prompt.ts) — system-prompt builder (locked by `src/prompt.test.ts`).
+  - [src/preload.ts](src/preload.ts), [src/sandbox.ts](src/sandbox.ts), [src/parse.ts](src/parse.ts), [src/format.ts](src/format.ts), [src/types.ts](src/types.ts), [src/cli.ts](src/cli.ts), [src/util.ts](src/util.ts) — preload, JS sandbox, and leaf helpers.
 - [tasksState.ts](tasksState.ts) — per-task `enabled` flags and history.
 - [tasksStateIO.ts](tasksStateIO.ts) — atomic load/update/persist for `tasksState.ts`.
 - [finalizeRun.ts](finalizeRun.ts) — standalone script to fetch scores for a given runId (read-only).
@@ -115,7 +128,7 @@ Every line of `runs/<runId>.jsonl` is one typed event. The interesting fields:
 ## Troubleshooting
 
 - **`OPENROUTER_API_KEY is required`** — set it in `.env`.
-- **`OpenRouter 404: No endpoints available matching your guardrail restrictions`** — model not available on the pinned provider (see `provider` block in [agent.ts](agent.ts)). Either switch the provider, switch the model, or remove the pin.
+- **`OpenRouter 404: No endpoints available matching your guardrail restrictions`** — the `MODEL_ID` isn't routable under your OpenRouter account's provider/guardrail settings. The request body in [src/openrouter.ts](src/openrouter.ts) sends no `provider` pin, so this is account-side: switch `MODEL_ID` to a model your account can reach, or adjust your OpenRouter routing preferences.
 - **`unauthenticated` from `startRun`** — set `BITGN_API_KEY`; `bitgn/ecom1-dev` requires it.
 - **`run has unfinished trials`** — automatic backstop: the submitter retries with `force: true` and forfeits the orphans. Should not bubble to the user.
 - **Score `not available` at trial end** — expected. Scoring is deferred; `batchFetchScores` polls `getRun` after submission.

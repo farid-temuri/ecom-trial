@@ -48,9 +48,14 @@ const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
 });
 const text = await res.text();
 console.log("HTTP", res.status);
-let data: any;
+
+type ProbeResponse = {
+  choices?: Array<{ message?: Record<string, unknown> }>;
+  usage?: unknown;
+};
+let data: ProbeResponse;
 try {
-  data = JSON.parse(text);
+  data = JSON.parse(text) as ProbeResponse;
 } catch {
   console.log(text);
   process.exit(1);
@@ -59,13 +64,13 @@ try {
 console.log("\n--- top-level keys ---");
 console.log(Object.keys(data));
 
-const msg = data?.choices?.[0]?.message;
+const msg = data.choices?.[0]?.message;
 console.log("\n--- message keys ---");
 console.log(msg ? Object.keys(msg) : "(no message)");
 
 if (msg) {
   for (const k of Object.keys(msg)) {
-    const v = (msg as any)[k];
+    const v = msg[k];
     const preview =
       typeof v === "string"
         ? v.slice(0, 300) + (v.length > 300 ? `… (+${v.length - 300} chars)` : "")
@@ -75,4 +80,4 @@ if (msg) {
 }
 
 console.log("\n--- usage ---");
-console.log(JSON.stringify(data?.usage, null, 2));
+console.log(JSON.stringify(data.usage, null, 2));

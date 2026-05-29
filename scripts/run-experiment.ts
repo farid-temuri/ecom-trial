@@ -26,7 +26,7 @@ type RunResult = {
   stdoutTail: string;
 };
 
-function parseFlags(s: string): Record<string, string> {
+export function parseFlags(s: string): Record<string, string> {
   const out: Record<string, string> = {};
   if (!s.trim()) return out;
   for (const kv of s.split(",")) {
@@ -44,13 +44,14 @@ async function runOne(
   const env: Record<string, string> = {
     ...process.env,
     WEB_PORT: "0",
-    // ensure default-off flags start OFF unless explicitly enabled
+    // Ensure every real default-off flag starts OFF unless explicitly enabled.
+    // These names are the canonical flag set defined in src/config.ts.
     FEAT_LAZY_MD: "false",
-    FEAT_READ_BEFORE_MUTATE: "false",
     FEAT_AUTO_CITE: "false",
-    FEAT_ALLOWED_OPS: "false",
-    FEAT_GATE_OUTCOME: "false",
     FEAT_STRICT_REFS: "false",
+    FEAT_CITING_REASONING: "false",
+    FEAT_STRUCTURED_FACTS: "false",
+    FEAT_REFS_WHY_CANONICAL: "false",
     ...flags,
   };
 
@@ -84,7 +85,8 @@ async function runOne(
   // Strip ANSI codes first
   const clean = stdout.replace(/\x1B\[[0-9;]*m/g, "");
   for (const m of clean.matchAll(re)) {
-    scores[m[1]] = Number(m[2]);
+    const id = m[1];
+    if (id) scores[id] = Number(m[2]);
   }
 
   // runId
@@ -109,7 +111,7 @@ async function runOne(
   return result;
 }
 
-function aggregate(results: RunResult[]): { perTaskAvg: Record<string, number>; meanPct: number } {
+export function aggregate(results: RunResult[]): { perTaskAvg: Record<string, number>; meanPct: number } {
   const perTaskAvg: Record<string, number> = {};
   for (const t of TASKS) {
     const vals = results.map((r) => r.scores[t]).filter((v) => typeof v === "number");
@@ -136,7 +138,10 @@ function appendReportRow(
     : "(all OFF)";
   const row =
     `| ${config} | ${flagStr} | ` +
-    TASKS.map((t) => (Number.isFinite(perTaskAvg[t]) ? perTaskAvg[t].toFixed(2) : "—")).join(" | ") +
+    TASKS.map((t) => {
+      const v = perTaskAvg[t];
+      return v !== undefined && Number.isFinite(v) ? v.toFixed(2) : "—";
+    }).join(" | ") +
     ` | **${meanPct.toFixed(1)}%** | ${runs.map((r) => r.runId ?? "?").join(", ")} |`;
 
   if (!md.includes("| Config | Flags |")) {
@@ -197,4 +202,6 @@ async function main(): Promise<void> {
   appendReportRow(config, flags, perTaskAvg, meanPct, results);
 }
 
-await main();
+if (import.meta.main) {
+  await main();
+}

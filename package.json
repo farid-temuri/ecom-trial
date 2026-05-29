@@ -6,6 +6,7 @@
     "start": "bun run main.ts",
     "stop": "bun run stopRun.ts",
     "spike": "bun run spike.ts",
+    "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

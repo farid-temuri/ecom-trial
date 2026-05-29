@@ -2,37 +2,42 @@
 
 Experimental harness changes are env-flag-gated. All default **OFF** so the agent runs identical to the pre-change baseline. Flip them on one at a time in `.env` (or as env vars) to bisect impact on the BitGN score.
 
+**All flags are parsed in one place — [src/config.ts](../src/config.ts) (`loadConfig`/`loadFeatures`)** — and threaded through `runAgent` as a typed `Features` object. That file is the canonical list. Gate logic that consumes them lives in [src/gates.ts](../src/gates.ts).
+
 Values accepted as "on": `true`, `1`, `on`, `yes` (case-insensitive). Anything else = off.
 
-At the start of each run, the harness logs (and now also records to `runs/<runId>.jsonl` under `run:start.envFlags`):
+**Canonical names vs aliases.** The canonical env-var name for every flag is `FEAT_*`. For two flags the older un-prefixed names are still accepted as back-compat aliases (canonical wins if both are set):
 
-```
-[features] LAZY_MD=… READ_BEFORE_MUTATE=… AUTO_CITE=… ALLOWED_OPS=… GATE_OUTCOME=… STRICT_REFS=… CITING_REASONING=… STRUCTURED_FACTS=… REASONING_EFFORT=… JUDGE_REASONING_EFFORT=…
-```
+| Canonical | Back-compat alias |
+|---|---|
+| `FEAT_CITING_REASONING` | `CITING_REASONING` |
+| `FEAT_STRUCTURED_FACTS` | `STRUCTURED_FACTS` |
 
-so you can confirm what was active without re-reading `.env`.
+There is **no** longer a `[features] …` line printed to stderr at startup (it was a module-level side effect removed in the `src/` refactor). To see what was active for a run, read `run:start.envFlags` in `runs/<runId>.jsonl` — it records every flag value at startup.
 
 ---
 
 ## Flag reference
 
+These are the flags that **exist in the current codebase** (`src/config.ts`):
+
 | Flag | Change | Default | Touches |
 |---|---|---|---|
 | `FEAT_LAZY_MD` | `.md` index + lazy preload | off | bootstrap, `tree/list/find/search/stat`, per-turn drain |
-| `FEAT_READ_BEFORE_MUTATE` | Soft-block mutations on unread paths | off | `write`, `delete` |
 | `FEAT_AUTO_CITE` | Auto-push read paths into `scratchpad.refs` | off | `read`, `write`, `delete`, bootstrap, lazy preload |
-| `FEAT_ALLOWED_OPS` | Declare `scratchpad.allowed_ops` for mutations | off | `write`, `delete`, `answer` shape check, scratchpad init |
-| `FEAT_GATE_OUTCOME` | `*_gate=NO/BLOCKED` forbids `OUTCOME_OK` | off | `answer` pre-flight |
 | `FEAT_STRICT_REFS` | Tighten refs gate from `openedPaths` to `readSet` | off | `answer` refs check, `harness.opened()` |
-| `CITING_REASONING` | Require `scratchpad.refs_why[path] = "≥8-char reason"` for every cited ref | off | system prompt, `answer` validation |
-| `STRUCTURED_FACTS` | Typed slot store: `scratchpad.facts[name] = {value, description, source, confidence}`. Sources auto-promote to `refs`. | off | system prompt, scratchpad init, `answer` validation |
+| `FEAT_CITING_REASONING` (alias `CITING_REASONING`) | Require `scratchpad.refs_why[path] = "≥8-char reason"` for every cited ref | off | system prompt, `answer` validation |
+| `FEAT_STRUCTURED_FACTS` (alias `STRUCTURED_FACTS`) | Typed slot store: `scratchpad.facts[name] = {value, description, source, confidence}`. Sources auto-promote to `refs` (legacy mode only). | off | system prompt, scratchpad init, `answer` validation |
+| `FEAT_REFS_WHY_CANONICAL` | `scratchpad.refs_why` becomes the **only** citation channel; `refs` is derived; `scratchpad.cite(path, reason)` is the API; auto-cite disabled | off | system prompt, `scratchpad.cite` injection, `answer` derive+validation |
+| `FEAT_DEBUG_REF_PROBE` | Run the diagnostic ref-alias probe on submission (logs every on-disk path each cited `.json` resolves to) | off | `harness.answer` (diagnostic only — never blocks) |
+
+> ⚠️ **Not implemented.** Earlier drafts of this doc described `FEAT_READ_BEFORE_MUTATE`, `FEAT_ALLOWED_OPS`, and `FEAT_GATE_OUTCOME`. **None of these exist in the current codebase** — they are not parsed in `src/config.ts` and setting them has no effect. Their design sections below are retained as historical design notes, clearly banner-flagged, in case they're revived. The flag-bisection orchestrator's defaults were corrected to stop referencing them.
 
 Plus two non-binary knobs:
 
 | Variable | Default | Notes |
 |---|---|---|
 | `REASONING_EFFORT` | `medium` | OpenRouter `reasoning.effort` for agent calls. `low` / `medium` / `high` / `off`. Silently ignored by non-reasoning models. |
-| `JUDGE_REASONING_EFFORT` | `low` | Same for the pre-submission judge. |
 
 To probe whether your model actually returns reasoning tokens:
 
@@ -62,6 +67,8 @@ It prints `usage.completion_tokens_details.reasoning_tokens` and the contents of
 
 ## FEAT_READ_BEFORE_MUTATE
 
+> ⚠️ **Not implemented in the current codebase** — historical design note only. No such flag is parsed in `src/config.ts`.
+
 **What it does:** `harness.write` (overwriting an existing path) and `harness.delete` require the path to be in the read set first. If missing:
 
 - For `write`: the harness tries `vm.read(path)`. If path exists, throws with current content embedded in the error message; the path joins read set + auto-cite. If path doesn't exist, the write proceeds (new file, no precondition).
@@ -87,6 +94,8 @@ The model receives the content inside the error string and can re-issue the muta
 
 ## FEAT_ALLOWED_OPS
 
+> ⚠️ **Not implemented in the current codebase** — historical design note only. No such flag is parsed in `src/config.ts`.
+
 **What it does:** model must declare `scratchpad.allowed_ops` as a subset of `["write","delete"]` before calling `harness.write` or `harness.delete`. Default `[]` (read-only). Undeclared op → hard throw with fix-it. Model can re-declare any time during the trial.
 
 `exec` is **NOT** gated — it's the read-only query path (`/bin/sql`, `/bin/whoami`, `/bin/date`). Gating exec broke every task's step 1 in run `9f2733` (0%). This is intentional and load-bearing.
@@ -102,6 +111,8 @@ When the flag is on, `runAgent` initializes `scratchpad.allowed_ops = []`.
 ---
 
 ## FEAT_GATE_OUTCOME
+
+> ⚠️ **Not implemented in the current codebase** — historical design note only. No such flag is parsed in `src/config.ts`.
 
 **What it does:** at `harness.answer` pre-flight (after refs+outcome checks, before verify), scans scratchpad for keys ending in `_gate`. If any value is exactly `"NO"` or `"BLOCKED"` AND `outcome === "OUTCOME_OK"`, throws with a fix-it suggesting to flip outcome or clear the gate.
 
@@ -160,17 +171,42 @@ The model is asked to commit slots on turn 1 (with `value: null, confidence: "pe
 
 ---
 
+## FEAT_REFS_WHY_CANONICAL
+
+**What it does:** makes `scratchpad.refs_why` the single source of truth for citations. When on:
+
+- A non-enumerable `scratchpad.cite(path, reason)` method is injected into the sandbox ([src/loop.ts](../src/loop.ts)). It is **atomic**: it throws immediately if `path` isn't an absolute path that was actually read this trial (in `readSet` or preloaded), or if `reason` is under 8 non-whitespace chars. This is the only documented way to cite.
+- `scratchpad.refs` becomes a **derived, read-only mirror** — at `harness.answer` time it is recomputed as `Object.keys(scratchpad.refs_why)` (see `deriveCanonicalRefs` in [src/gates.ts](../src/gates.ts)). Assigning to `refs` directly is pointless; it gets overwritten.
+- Auto-cite is **disabled regardless of `FEAT_AUTO_CITE`**, and `FEAT_STRUCTURED_FACTS` slot sources are **not** auto-merged — the model must `cite()` each one explicitly with its own reason.
+- The `<citation-protocol-canonical>` system-prompt block replaces the looser `<refs-reasoning-required>` block.
+
+**Why:** the legacy auto-cite/auto-merge paths produced boilerplate reasons the grader penalized as over-citing. Forcing an explicit, reasoned `cite()` per path makes every citation model-authored and load-bearing.
+
+**Risks:** stricter — a forgotten `cite()` means a missing ref (grader 0). The system-prompt block leans heavily on "rewrite the reason, don't drop the file" to counter over-pruning.
+
+---
+
+## FEAT_DEBUG_REF_PROBE
+
+**What it does:** purely diagnostic. When on, `harness.answer` runs a probe before the gates: for every `.json` path about to be cited, it calls `find(name: basename)` and emits a `bootstrap` event (`tool="ref_alias_probe"`) listing every on-disk path that basename resolves to. This surfaces brand-mirror vs category-mirror vs flat aliases in the run log so you can see where the grader's "valid reference" form actually lives.
+
+**Why:** the BitGN catalog has alias paths; the grader compares refs by exact string equality. The probe makes alias mismatches visible from `runs/*.jsonl` instead of inferred from a single grader hint.
+
+**Risks:** adds one `find` RPC per cited `.json` on **every** submission attempt (including retries), so it sits on the latency-critical submit path — hence it is **off by default** and gated behind this flag. It never blocks submission (failures are swallowed).
+
+---
+
 ## Suggested bisect plan
 
+Across the flags that **actually exist** today:
+
 1. **All off** — confirm parity with the 67.6% baseline (run `f4bf2f`). If different, something else changed.
-2. **`FEAT_GATE_OUTCOME=true`** — smallest blast radius. Look for fewer `OUTCOME_OK` + gate=NO contradictions in the trial logs.
-3. **`FEAT_LAZY_MD=true`** (alone, GATE_OUTCOME still on or reverted). Check bucket-#2 tasks (t24/t30/t34/t41) — do `<workspace-docs-extra>` blocks appear when the model lists subfolders? Do those tasks score higher?
-4. **`FEAT_ALLOWED_OPS=true`** — model now declares `allowed_ops`. Watch for first-step gate hits; if frequent, the prompt may need a stronger nudge.
-5. **`FEAT_READ_BEFORE_MUTATE=true`** — only after ALLOWED_OPS, since mutations are rare without it. Soft-block fires should appear as `[runtime error] harness.write(...) soft-blocked` in step logs.
-6. **`FEAT_AUTO_CITE=true`** — biggest behavior shift. Check refs lengths in `[answer submitted]` events; if blowing up, also enable `FEAT_STRICT_REFS` to tighten and force model to be deliberate about reads.
-7. **`FEAT_STRICT_REFS=true`** — last for the original six, since it depends on the read-set discipline.
-8. **`CITING_REASONING=true`** — once the refs gates settle, layer reasoning-per-cite on top.
-9. **`STRUCTURED_FACTS=true`** — orthogonal to the refs flags; tests whether structured working memory changes the SQL-verification discipline. Pair with `REASONING_EFFORT=medium` (default) for the model to actually use the slots.
+2. **`FEAT_LAZY_MD=true`** (alone). Check bucket-#2 tasks (t24/t30/t34/t41) — do `<workspace-docs-extra>` blocks appear when the model lists subfolders? Do those tasks score higher?
+3. **`FEAT_AUTO_CITE=true`** — big behavior shift. Check refs lengths in `[answer submitted]` events; if blowing up, also enable `FEAT_STRICT_REFS` to tighten and force the model to be deliberate about reads.
+4. **`FEAT_STRICT_REFS=true`** — depends on the read-set discipline, so layer it after auto-cite.
+5. **`FEAT_CITING_REASONING=true`** — once the refs gates settle, layer reasoning-per-cite on top.
+6. **`FEAT_STRUCTURED_FACTS=true`** — orthogonal to the refs flags; tests whether structured working memory changes the SQL-verification discipline. Pair with `REASONING_EFFORT=medium` (default) for the model to actually use the slots.
+7. **`FEAT_REFS_WHY_CANONICAL=true`** — the strictest citation regime; supersedes the auto-cite/auto-merge paths. Test last, on its own.
 
 Run the same 7 tasks each pass (`bun run main.ts t02 t13 t22 t27 t34 t39 t41`). Compare per-task scores in `tasksState.ts` after each run. t02 is the control — if it ever drops to 0, the latest flag is the regression.
 
@@ -190,7 +226,8 @@ The orchestrator handles BitGN's ~1 run/min rate limit (75s inter-run sleep + au
 
 After flipping a flag on:
 
-- [ ] Run boots: `[features] …=true` for the flipped flag shown in stderr
+- [ ] Flag recorded: confirm the flipped flag is `true` under `run:start.envFlags` in `runs/<runId>.jsonl`
+- [ ] Tests pass: `bun test`
 - [ ] Typecheck passes: `bun run typecheck`
 - [ ] Smoke test 1 task: `bun run main.ts t02`
 - [ ] Full 7-task run: `bun run main.ts t02 t13 t22 t27 t34 t39 t41`

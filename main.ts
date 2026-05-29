@@ -4,7 +4,9 @@ import {
   HarnessService,
   EvalPolicy,
 } from "@buf/bitgn_api.bufbuild_es/bitgn/harness_pb";
-import { runAgent } from "./agent";
+import { runAgent } from "./src/loop";
+import { CLI } from "./src/cli";
+import { sleep } from "./src/util";
 import { bus } from "./events";
 import { startWebServer } from "./web";
 import { loadHints, makeRunId, openRunWriter } from "./logs";
@@ -55,13 +57,6 @@ class Semaphore {
   }
 }
 
-const CLI = {
-  red: "\x1B[31m",
-  green: "\x1B[32m",
-  blue: "\x1B[34m",
-  clr: "\x1B[0m",
-} as const;
-
 function policyName(p: EvalPolicy): string {
   return EvalPolicy[p] ?? `EvalPolicy(${p})`;
 }
@@ -71,9 +66,6 @@ const SCORE_POLL_TIMEOUT_MS = process.env.SCORE_POLL_TIMEOUT_MS
   : 5 * 60 * 1000;
 const SCORE_POLL_INITIAL_DELAY_MS = 3000;
 const SCORE_POLL_MAX_DELAY_MS = 15000;
-
-const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms));
 
 type ScoredTrial = {
   taskId: string;
@@ -177,12 +169,10 @@ async function main(): Promise<void> {
       FEAT_AUTO_CITE: process.env.FEAT_AUTO_CITE ?? "",
       FEAT_STRICT_REFS: process.env.FEAT_STRICT_REFS ?? "",
       FEAT_REFS_WHY_CANONICAL: process.env.FEAT_REFS_WHY_CANONICAL ?? "",
+      FEAT_DEBUG_REF_PROBE: process.env.FEAT_DEBUG_REF_PROBE ?? "",
       CITING_REASONING: process.env.CITING_REASONING ?? "",
       STRUCTURED_FACTS: process.env.STRUCTURED_FACTS ?? "",
       REASONING_EFFORT: process.env.REASONING_EFFORT ?? "",
-      JUDGE_REASONING_EFFORT: process.env.JUDGE_REASONING_EFFORT ?? "",
-      JUDGE_ENABLED: process.env.JUDGE_ENABLED ?? "",
-      JUDGE_MODEL: process.env.JUDGE_MODEL ?? "",
     };
     bus.emit({
       type: "run:start",
