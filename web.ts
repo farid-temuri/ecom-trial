@@ -1,4 +1,4 @@
-import { bus, type TrialEvent } from "./events";
+import { bus } from "./events";
 import {
   clusterFailures,
   listRuns,
@@ -142,6 +142,24 @@ const HTML = `<!doctype html>
     background: var(--panel);
   }
   .score-detail { color: var(--muted); margin: 8px 0 0; padding-left: 16px; }
+  td.tok { color: var(--muted); text-align: right; white-space: nowrap; font-size: 11px; }
+  details.env, details.bootstrap { margin: 8px 0; padding: 4px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--panel); }
+  details.env summary, details.bootstrap summary { cursor: pointer; color: var(--muted); }
+  details.boot-item { margin: 4px 0 4px 8px; padding: 4px 6px; border-left: 2px solid var(--border); }
+  details.boot-item.err { border-left-color: var(--err); }
+  details.boot-item summary { cursor: pointer; color: var(--fg); font-size: 12px; }
+  .err-line { color: var(--err); padding: 4px 0; }
+  tr.step-detail td { padding: 4px 8px 8px; background: var(--panel); border-bottom: 1px solid var(--border); }
+  tr.step-detail details { margin: 4px 0; }
+  tr.step-detail summary { cursor: pointer; color: var(--muted); padding: 2px 0; }
+  pre.dump { margin: 4px 0; padding: 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; max-height: 400px; overflow-y: auto; font-size: 11px; }
+  pre.dump.reasoning { border-left: 3px solid var(--accent); }
+  pre.dump.code { color: #c8d4e3; }
+  pre.dump.output { color: #aab4be; }
+  pre.dump.scratchpad { border-left: 3px solid var(--warn); }
+  .refresh-btn { background: var(--panel-2); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 4px 10px; font: inherit; cursor: pointer; margin-left: 8px; }
+  .refresh-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .refresh-btn:active { background: var(--panel); }
 
   /* Runs view */
   #view-runs { grid-template-columns: 1fr; padding: 16px; overflow-y: auto; }
@@ -201,8 +219,9 @@ const HTML = `<!doctype html>
     <button data-view="runs">Runs</button>
     <button data-view="hints">Hints</button>
   </nav>
-  <span class="meta" id="meta">connecting…</span>
-  <span class="status dead" id="conn">disconnected</span>
+  <span class="meta" id="meta">click Refresh to load…</span>
+  <button id="refresh" class="refresh-btn" title="Pull latest events">↻ Refresh</button>
+  <span class="status" id="conn">idle</span>
 </header>
 
 <div id="view-run" class="view active">
@@ -320,25 +339,57 @@ function renderMain() {
   if (!t) return;
   const parts = [];
   if (t.instruction) parts.push('<div class="instruction">' + escapeHtml(t.instruction) + '</div>');
+  if (state.envFlags) {
+    const flagPairs = Object.entries(state.envFlags).filter(function(p){ return p[1]; });
+    if (flagPairs.length) {
+      parts.push('<details class="env"><summary>env flags (' + flagPairs.length + ')</summary><pre>');
+      for (const p of flagPairs) parts.push(escapeHtml(p[0] + '=' + p[1]) + '\\n');
+      parts.push('</pre></details>');
+    }
+  }
+  // Bootstrap entries (system prompt, initial scratchpad, /docs preload, etc.)
+  if (t.bootstraps && t.bootstraps.length) {
+    parts.push('<details class="bootstrap"><summary>bootstrap (' + t.bootstraps.length + ')</summary>');
+    for (const b of t.bootstraps) {
+      const cls = b.ok === false ? 'err' : '';
+      parts.push('<details class="boot-item ' + cls + '"><summary>' + escapeHtml(b.tool) + ' (' + (b.outputBytes || (b.output && b.output.length) || 0) + ' B)' + (b.ok === false ? ' ⚠' : '') + '</summary>');
+      if (b.errorMessage) parts.push('<div class="err-line">' + escapeHtml(b.errorMessage) + '</div>');
+      parts.push('<pre class="dump">' + escapeHtml(typeof b.output === 'string' ? b.output : JSON.stringify(b.output, null, 2)) + '</pre>');
+      parts.push('</details>');
+    }
+    parts.push('</details>');
+  }
   if (t.steps.length === 0) {
     parts.push('<div class="empty">Waiting for first step…</div>');
   } else {
-    parts.push('<table><thead><tr><th>#</th><th>tool</th><th>plan</th><th>latency</th></tr></thead><tbody>');
+    parts.push('<table><thead><tr><th>#</th><th>tool</th><th>plan</th><th>latency</th><th>tok</th></tr></thead><tbody>');
     for (const s of t.steps) {
       const cls = s.ok === false ? 'err' : (s.tool === 'report_completion' ? 'done' : '');
-      parts.push(
-        '<tr>' +
+      const tok = s.reasoningTokens != null
+        ? (s.reasoningTokens + 'r/' + (s.completionTokens || '?') + 'c')
+        : (s.completionTokens != null ? (s.completionTokens + 'c') : '');
+      const headRow =
+        '<tr class="step-head" data-step="' + s.step + '">' +
         '<td>' + s.step + '</td>' +
         '<td class="tool ' + cls + '">' + escapeHtml(s.tool) + (s.errorMessage ? ' ⚠' : '') + '</td>' +
         '<td>' + escapeHtml(s.planFirst) + (s.errorMessage ? '<div style="color:var(--err);margin-top:4px">' + escapeHtml(s.errorMessage) + '</div>' : '') + '</td>' +
         '<td class="lat">' + s.latencyMs + ' ms</td>' +
-        '</tr>'
-      );
+        '<td class="tok">' + escapeHtml(tok) + '</td>' +
+        '</tr>';
+      const detailBits = [];
+      if (s.reasoning) detailBits.push('<details open><summary>reasoning (' + s.reasoning.length + ' chars)</summary><pre class="dump reasoning">' + escapeHtml(s.reasoning) + '</pre></details>');
+      if (s.code) detailBits.push('<details><summary>code</summary><pre class="dump code">' + escapeHtml(s.code) + '</pre></details>');
+      if (s.output) detailBits.push('<details><summary>output</summary><pre class="dump output">' + escapeHtml(s.output) + '</pre></details>');
+      if (s.scratchpadAfter !== undefined) detailBits.push('<details><summary>scratchpad after</summary><pre class="dump scratchpad">' + escapeHtml(typeof s.scratchpadAfter === 'string' ? s.scratchpadAfter : JSON.stringify(s.scratchpadAfter, null, 2)) + '</pre></details>');
+      const detailRow = detailBits.length
+        ? '<tr class="step-detail"><td colspan="5">' + detailBits.join('') + '</td></tr>'
+        : '';
+      parts.push(headRow + detailRow);
     }
     parts.push('</tbody></table>');
   }
   if (t.status === 'done') {
-    const scoreLine = t.scoreAvailable ? 'Score ' + t.score.toFixed(2) : 'Score not available';
+    const scoreLine = t.scoreAvailable ? 'Score ' + (t.score != null ? t.score.toFixed(2) : '?') : 'Score not available';
     parts.push('<div class="summary"><strong>' + scoreLine + '</strong>');
     if (t.scoreDetail && t.scoreDetail.length) {
       parts.push('<ul class="score-detail">');
@@ -353,15 +404,23 @@ function renderMain() {
 function ensureTrial(taskId) {
   let t = state.trials.get(taskId);
   if (!t) {
-    t = { taskId, steps: [], status: 'pending', scoreAvailable: false, scoreDetail: [] };
+    t = { taskId, steps: [], bootstraps: [], status: 'pending', scoreAvailable: false, scoreDetail: [] };
     state.trials.set(taskId, t);
   }
+  if (!t.bootstraps) t.bootstraps = [];
   return t;
 }
 
 function handle(ev) {
   if (ev.type === 'run:start') {
+    // New run begins — drop any prior trials so we don't double-render
+    // events from a previous run still sitting in the bus buffer.
+    state.trials = new Map();
+    state.finalPct = null;
+    state.selected = null;
     state.benchmarkId = ev.benchmarkId;
+    state.runId = ev.runId;
+    state.envFlags = ev.envFlags || {};
     $('meta').textContent = ev.benchmarkId + ' · ' + ev.policy + ' · ' + ev.modelId + ' · ' + ev.tasks.length + ' tasks';
     for (const t of ev.tasks) ensureTrial(t.taskId);
     renderTasks();
@@ -373,19 +432,38 @@ function handle(ev) {
     if (!state.selected) state.selected = ev.taskId;
     renderTasks();
     renderMain();
+  } else if (ev.type === 'bootstrap') {
+    const t = ensureTrial(ev.taskId);
+    t.bootstraps.push({
+      tool: ev.tool, input: ev.input, output: ev.output,
+      outputBytes: ev.outputBytes, ok: ev.ok, errorMessage: ev.errorMessage,
+    });
+    if (state.selected === ev.taskId) renderMain();
   } else if (ev.type === 'step') {
     const t = ensureTrial(ev.taskId);
     t.steps.push({
       step: ev.step, tool: ev.tool, planFirst: ev.planFirst,
       latencyMs: ev.latencyMs, ok: ev.ok, errorMessage: ev.errorMessage,
+      code: ev.input && ev.input.code, output: ev.output,
+      reasoning: ev.reasoning, reasoningTokens: ev.reasoningTokens,
+      completionTokens: ev.completionTokens, promptTokens: ev.promptTokens,
+      scratchpadAfter: ev.scratchpadAfter,
     });
     if (state.selected === ev.taskId) renderMain();
   } else if (ev.type === 'trial:end') {
     const t = ensureTrial(ev.taskId);
     t.status = 'done';
     t.scoreAvailable = ev.scoreAvailable;
+    if (ev.scoreAvailable) t.score = ev.score;
+    if (ev.scoreDetail && ev.scoreDetail.length) t.scoreDetail = ev.scoreDetail;
+    renderTasks();
+    if (state.selected === ev.taskId) renderMain();
+  } else if (ev.type === 'trial:score') {
+    // Deferred-scoring landing — overwrites the placeholder from trial:end
+    const t = ensureTrial(ev.taskId);
+    t.scoreAvailable = true;
     t.score = ev.score;
-    t.scoreDetail = ev.scoreDetail;
+    if (ev.scoreDetail && ev.scoreDetail.length) t.scoreDetail = ev.scoreDetail;
     renderTasks();
     if (state.selected === ev.taskId) renderMain();
   } else if (ev.type === 'run:end') {
@@ -514,62 +592,72 @@ function setTab(name) {
 }
 
 document.querySelectorAll('header nav button').forEach((btn) => {
-  btn.addEventListener('click', () => setTab(btn.dataset.view));
+  btn.addEventListener('click', () => {
+    const view = btn.dataset.view;
+    // Clicking back to "Run" tab returns us to the live view — drop the
+    // past-run lock and force an immediate poll.
+    if (view === 'run' && state.currentRunId) {
+      state.currentRunId = null;
+      state.lastEventCount = 0;
+      $('run-banner').textContent = '';
+      resetRunView();
+      refreshNow();
+    }
+    setTab(view);
+  });
 });
 $('hints-save').addEventListener('click', saveHintsApi);
 $('hints-draft').addEventListener('click', draftRule);
 
-/* SSE */
-function connect() {
-  const es = new EventSource('/events');
-  es.onopen = () => { $('conn').textContent = 'live'; $('conn').className = 'status live'; };
-  es.onerror = () => { $('conn').textContent = 'disconnected'; $('conn').className = 'status dead'; };
-  es.onmessage = (m) => {
-    try {
-      const ev = JSON.parse(m.data);
-      // Ignore live events while viewing a past run
-      if (state.currentRunId) return;
-      handle(ev);
-    } catch (e) { console.error(e); }
-  };
+/* Manual refresh only — no auto-polling. Click Refresh to pull a fresh
+   snapshot from the server and replay it into a clean state. */
+let refreshing = false;
+
+async function refreshNow() {
+  if (refreshing) return;
+  if (state.currentRunId) {
+    $('conn').textContent = 'past run';
+    $('conn').className = 'status';
+    return;
+  }
+  refreshing = true;
+  try {
+    const res = await fetch('/api/current');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const body = await res.json();
+    const events = Array.isArray(body) ? body : (body.events || []);
+    const wasSelected = state.selected;
+    state.trials = new Map();
+    state.finalPct = null;
+    state.envFlags = null;
+    for (const ev of events) handle(ev);
+    if (wasSelected && state.trials.has(wasSelected)) state.selected = wasSelected;
+    renderTasks();
+    renderMain();
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    const ss = String(now.getSeconds()).padStart(2, '0');
+    $('conn').textContent = 'updated ' + hh + ':' + mm + ':' + ss;
+    $('conn').className = 'status live';
+  } catch (err) {
+    console.error(err);
+    $('conn').textContent = 'refresh failed';
+    $('conn').className = 'status dead';
+  } finally {
+    refreshing = false;
+  }
 }
-connect();
+
+const refreshBtn = document.getElementById('refresh');
+if (refreshBtn) refreshBtn.addEventListener('click', refreshNow);
+
+// One initial fetch on page load so the view isn't empty.
+refreshNow();
 </script>
 </body>
 </html>`;
 
-function sseStream(): Response {
-  const encoder = new TextEncoder();
-  let unsubscribe: (() => void) | null = null;
-  let keepalive: ReturnType<typeof setInterval> | null = null;
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      const send = (e: TrialEvent): void => {
-        try {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(e)}\n\n`));
-        } catch {}
-      };
-      for (const e of bus.replay()) send(e);
-      unsubscribe = bus.on(send);
-      keepalive = setInterval(() => {
-        try {
-          controller.enqueue(encoder.encode(`: keepalive\n\n`));
-        } catch {}
-      }, 15000);
-    },
-    cancel() {
-      unsubscribe?.();
-      if (keepalive) clearInterval(keepalive);
-    },
-  });
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-    },
-  });
-}
 
 async function draftHint(cluster: FailureCluster): Promise<string> {
   if (!OPENROUTER_KEY) {
@@ -625,7 +713,9 @@ export function startWebServer(port: number): { url: string; stop: () => void } 
         if (path === "/" || path === "/index.html") {
           return new Response(HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
         }
-        if (path === "/events") return sseStream();
+        if (path === "/api/current" && req.method === "GET") {
+          return Response.json(bus.replay());
+        }
         if (path === "/api/runs" && req.method === "GET") {
           return Response.json(listRuns());
         }

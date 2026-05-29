@@ -2,7 +2,7 @@
 
 A TypeScript / Bun agent that runs the [BitGN](https://bitgn.com) **ECOM** benchmark. It connects to the BitGN harness, runs each trial through an LLM (via [OpenRouter](https://openrouter.ai)) that drives a per-trial JavaScript sandbox, then submits the run and fetches scores.
 
-A live web UI streams every step as the run progresses, and each run is also saved to `runs/<runId>.jsonl`.
+Every event (steps, reasoning, scratchpad state, system prompt, grader detail) is written to `runs/<runId>.jsonl`. A web UI (refresh-only — no SSE) browses the current run and every past one in the same view.
 
 ## Requirements
 
@@ -34,9 +34,15 @@ A subset of tasks (positional task ids override the enabled filter):
 bun run main.ts t13 t38
 ```
 
-Live web UI: <http://localhost:3000> while a run is going (set `WEB_PORT=0` to disable).
+Web UI: <http://localhost:3000> while a run is going (set `WEB_PORT=0` to disable). The UI is **refresh-only** — click ↻ Refresh to pull the latest snapshot. No auto-polling, no SSE, no flicker. The same UI also lists every past run (Runs tab) so you can replay them turn-by-turn — code, output, reasoning, scratchpad state per step.
 
-When the run finishes you'll see per-task scores and a final percentage. Full event log is saved to `runs/<runId>.jsonl`.
+To browse past runs without starting a new benchmark:
+
+```sh
+bun run scripts/web.ts          # boots the web UI standalone on $WEB_PORT (default 3000)
+```
+
+When the run finishes you'll see per-task scores, the grader's per-trial detail (e.g. `answer missing required reference '/proc/catalog/X.json'`), and a final percentage. The full event log is saved to `runs/<runId>.jsonl`.
 
 ### Signal handling
 
@@ -64,7 +70,10 @@ bun run finalizeRun.ts <runId>   # read-only; pulls scores via getRun and update
 | `SCORE_POLL_TIMEOUT_MS` | `300000` | Max time to poll `getRun` for deferred scores after submission. |
 | `JUDGE_ENABLED` | `true` | Pre-submission LLM judge gate. Set `false` to skip. |
 | `JUDGE_MODEL` | `MODEL_ID` | Model used for the judge. |
+| `REASONING_EFFORT` | `medium` | OpenRouter `reasoning.effort` passed on agent calls (`low` / `medium` / `high` / `off`). Silently ignored by non-reasoning models. |
+| `JUDGE_REASONING_EFFORT` | `low` | Same setting for the pre-submission judge — kept cheap by default. |
 | `WEB_PORT` | `3000` | `0` to disable the web UI. |
+| `FEAT_*` / `CITING_REASONING` / `STRUCTURED_FACTS` | `false` | Experimental harness behavior flags. See [docs/FEATURES.md](docs/FEATURES.md). |
 
 ## tasksState.ts
 
@@ -81,15 +90,27 @@ Per-task control file. Flip `enabled: false` to skip a task on the next run with
 
 ## Project layout
 
-- [main.ts](main.ts) — control plane: BitGN harness, run lifecycle, concurrency, score polling, signal handlers.
-- [agent.ts](agent.ts) — per-trial reasoning loop: calls OpenRouter, executes the model's JS in a Bun sandbox against the ECOM runtime.
+- [main.ts](main.ts) — control plane: BitGN harness, run lifecycle, concurrency, score polling (with grader detail capture via `getTrial`), signal handlers.
+- [agent.ts](agent.ts) — per-trial reasoning loop: calls OpenRouter, executes the model's JS in a Bun sandbox against the ECOM runtime, logs reasoning + scratchpad per step.
 - [tasksState.ts](tasksState.ts) — per-task `enabled` flags and history.
 - [tasksStateIO.ts](tasksStateIO.ts) — atomic load/update/persist for `tasksState.ts`.
 - [finalizeRun.ts](finalizeRun.ts) — standalone script to fetch scores for a given runId (read-only).
-- [web.ts](web.ts) — Bun HTTP server with the live UI.
-- [events.ts](events.ts) — in-process event bus.
-- [logs.ts](logs.ts) — writes `runs/<runId>.jsonl` and loads `hints/system.md`.
+- [web.ts](web.ts) — Bun HTTP server + refresh-only UI for live + past runs.
+- [events.ts](events.ts) — in-process event bus + typed event union.
+- [logs.ts](logs.ts) — writes `runs/<runId>.jsonl`; loads `hints/system.md`.
 - [hints/system.md](hints/system.md) — extra system-prompt content loaded on every run.
+- [scripts/web.ts](scripts/web.ts) — standalone web viewer (no trials).
+- [scripts/run-experiment.ts](scripts/run-experiment.ts) — flag-bisection orchestrator with per-config aggregation, rate-limit-aware spacing, and markdown reporting.
+- [scripts/test-reasoning.ts](scripts/test-reasoning.ts) — probes OpenRouter to confirm the model actually returns `message.reasoning` for the configured effort.
+
+### What gets logged per run
+
+Every line of `runs/<runId>.jsonl` is one typed event. The interesting fields:
+
+- `run:start` → `envFlags` (every `FEAT_*`, `REASONING_EFFORT`, etc. at startup — no more guessing what was active).
+- `bootstrap` with `tool="system_prompt"` and `tool="initial_scratchpad"` → the **full** system prompt and the prepopulated scratchpad for that trial.
+- `step` → `code`, `output`, `reasoning` (full text), `reasoningTokens`, `completionTokens`, `promptTokens`, `scratchpadAfter` (deep snapshot of scratchpad after the script ran).
+- `trial:score` → `score` and `scoreDetail` (the grader's exact reason, e.g. `answer contains invalid reference '/proc/catalog/X.json'`).
 
 ## Troubleshooting
 

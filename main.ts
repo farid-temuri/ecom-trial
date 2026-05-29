@@ -66,26 +66,59 @@ const SCORE_POLL_MAX_DELAY_MS = 15000;
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
+type ScoredTrial = {
+  taskId: string;
+  trialId: string;
+  score: number;
+  scoreDetail: string[];
+};
+
+async function fetchScoreDetail(
+  client: ReturnType<typeof createClient<typeof HarnessService>>,
+  trialId: string,
+): Promise<string[]> {
+  try {
+    const t = await client.getTrial({ trialId });
+    return t.scoreDetail ?? [];
+  } catch (err) {
+    console.error(`  getTrial(${trialId}) failed:`, err);
+    return [];
+  }
+}
+
 async function batchFetchScores(
   client: ReturnType<typeof createClient<typeof HarnessService>>,
   runId: string,
-): Promise<Array<[string, number]>> {
+): Promise<ScoredTrial[]> {
   const start = Date.now();
   let delay = SCORE_POLL_INITIAL_DELAY_MS;
   let attempt = 0;
+  const collect = async (
+    trials: Array<{ taskId: string; trialId: string; score?: number; scoreAvailable: boolean }>,
+  ): Promise<ScoredTrial[]> => {
+    const scored = trials.filter((t) => t.scoreAvailable && typeof t.score === "number");
+    return Promise.all(
+      scored.map(async (t) => ({
+        taskId: t.taskId,
+        trialId: t.trialId,
+        score: t.score as number,
+        scoreDetail: await fetchScoreDetail(client, t.trialId),
+      })),
+    );
+  };
   while (Date.now() - start < SCORE_POLL_TIMEOUT_MS) {
     attempt++;
     try {
       const r = await client.getRun({ runId });
-      const scoredTrials = r.trials.filter(
+      const scoredCount = r.trials.filter(
         (t) => t.scoreAvailable && typeof t.score === "number",
-      );
+      ).length;
       const elapsed = Math.round((Date.now() - start) / 1000);
       console.log(
-        `  [poll ${attempt}] scored ${scoredTrials.length}/${r.trials.length} (runScoreAvailable=${r.scoreAvailable}, elapsed=${elapsed}s)`,
+        `  [poll ${attempt}] scored ${scoredCount}/${r.trials.length} (runScoreAvailable=${r.scoreAvailable}, elapsed=${elapsed}s)`,
       );
-      if (r.scoreAvailable || scoredTrials.length === r.trials.length) {
-        return scoredTrials.map((t) => [t.taskId, t.score as number]);
+      if (r.scoreAvailable || scoredCount === r.trials.length) {
+        return collect(r.trials);
       }
     } catch (err) {
       console.error(`  [poll ${attempt}] getRun error:`, err);
@@ -98,9 +131,7 @@ async function batchFetchScores(
   );
   try {
     const r = await client.getRun({ runId });
-    return r.trials
-      .filter((t) => t.scoreAvailable && typeof t.score === "number")
-      .map((t) => [t.taskId, t.score as number]);
+    return collect(r.trials);
   } catch {
     return [];
   }
@@ -132,6 +163,20 @@ async function main(): Promise<void> {
     );
 
     const hints = loadHints();
+    const envFlags = {
+      FEAT_LAZY_MD: process.env.FEAT_LAZY_MD ?? "",
+      FEAT_READ_BEFORE_MUTATE: process.env.FEAT_READ_BEFORE_MUTATE ?? "",
+      FEAT_AUTO_CITE: process.env.FEAT_AUTO_CITE ?? "",
+      FEAT_ALLOWED_OPS: process.env.FEAT_ALLOWED_OPS ?? "",
+      FEAT_GATE_OUTCOME: process.env.FEAT_GATE_OUTCOME ?? "",
+      FEAT_STRICT_REFS: process.env.FEAT_STRICT_REFS ?? "",
+      CITING_REASONING: process.env.CITING_REASONING ?? "",
+      STRUCTURED_FACTS: process.env.STRUCTURED_FACTS ?? "",
+      REASONING_EFFORT: process.env.REASONING_EFFORT ?? "",
+      JUDGE_REASONING_EFFORT: process.env.JUDGE_REASONING_EFFORT ?? "",
+      JUDGE_ENABLED: process.env.JUDGE_ENABLED ?? "",
+      JUDGE_MODEL: process.env.JUDGE_MODEL ?? "",
+    };
     bus.emit({
       type: "run:start",
       runId,
@@ -142,11 +187,12 @@ async function main(): Promise<void> {
       tasks: bench.tasks.map((t) => ({ taskId: t.taskId, hint: t.hint })),
       hints: hints.text,
       hintsHash: hints.hash,
+      envFlags,
       ts: Date.now(),
     });
 
     const run = await client.startRun({
-      name: "Claude Popusk 6.7 EXTRA LOW",
+      name: `GeorgeDroid [${MODEL_ID}]`,
       benchmarkId: BENCH_ID,
       apiKey: BITGN_API_KEY,
     });
@@ -272,9 +318,23 @@ async function main(): Promise<void> {
 
     console.log(`${CLI.blue}Fetching scores for run ${run.runId}${CLI.clr}`);
     const fetched = await batchFetchScores(client, run.runId);
-    for (const [taskId, score] of fetched) {
-      scores.push([taskId, score]);
-      updateTaskState(taskStateMap, taskId, score, new Date().toISOString());
+    for (const t of fetched) {
+      scores.push([t.taskId, t.score]);
+      updateTaskState(taskStateMap, t.taskId, t.score, new Date().toISOString());
+      if (t.scoreDetail.length > 0) {
+        const style = t.score === 1 ? CLI.green : CLI.red;
+        for (const d of t.scoreDetail) {
+          console.log(`  ${style}[${t.taskId} grader] ${d}${CLI.clr}`);
+        }
+      }
+      bus.emit({
+        type: "trial:score",
+        taskId: t.taskId,
+        trialId: t.trialId,
+        score: t.score,
+        scoreDetail: t.scoreDetail,
+        ts: Date.now(),
+      });
     }
     try {
       await persistState(taskStateMap);

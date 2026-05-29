@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "start": "bun run main.ts",
+    "stop": "bun run stopRun.ts",
     "spike": "bun run spike.ts",
     "typecheck": "tsc --noEmit"
   },

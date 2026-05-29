@@ -9,6 +9,7 @@ export type TrialEvent =
       tasks: Array<{ taskId: string; hint: string }>;
       hints: string;
       hintsHash: string;
+      envFlags?: Record<string, string>;
       ts: number;
     }
   | {
@@ -16,6 +17,8 @@ export type TrialEvent =
       taskId: string;
       trialId: string;
       instruction: string;
+      systemPrompt?: string;
+      initialScratchpad?: unknown;
       ts: number;
     }
   | {
@@ -41,6 +44,11 @@ export type TrialEvent =
       latencyMs: number;
       ok: boolean;
       errorMessage?: string;
+      reasoning?: string;
+      reasoningTokens?: number;
+      completionTokens?: number;
+      promptTokens?: number;
+      scratchpadAfter?: unknown;
       ts: number;
     }
   | {
@@ -48,6 +56,14 @@ export type TrialEvent =
       taskId: string;
       scoreAvailable: boolean;
       score?: number;
+      scoreDetail: string[];
+      ts: number;
+    }
+  | {
+      type: "trial:score";
+      taskId: string;
+      trialId: string;
+      score: number;
       scoreDetail: string[];
       ts: number;
     }

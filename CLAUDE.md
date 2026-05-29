@@ -18,6 +18,9 @@ Run from the repo root:
 - `bun run typecheck` — `tsc --noEmit`
 - `bun run spike` — small connectivity smoke test ([spike.ts](spike.ts))
 - `bun run finalizeRun.ts <runId>` — read-only score fetch for a given run; updates `tasksState.ts`
+- `bun run scripts/web.ts` — boot the web UI standalone (no trials) to browse past runs in `runs/`
+- `bun run scripts/test-reasoning.ts <model> <effort>` — probe OpenRouter to confirm a model actually returns reasoning tokens
+- `bun run scripts/run-experiment.ts <name> "<FLAG=val,...>" <N>` — flag-bisection orchestrator: runs the 7-task slice N times per config, aggregates per-task means into `docs/flag-experiments.md`, retries on BitGN rate-limit
 
 There is no test suite, linter, or formatter. The agent is validated by running it against the BitGN harness.
 
@@ -48,7 +51,21 @@ Only `code` is executed — it's JavaScript run in a Bun `AsyncFunction` sandbox
 - `scratchpad` — persistent JS object (mutate in place; binding is `const`)
 - `console` — `.log/.error/.warn` captured and returned to the model next turn
 
-Submission gates: when the model calls `await harness.answer(scratchpad, verify)`, the harness runs (in order) refs validity → outcome shape → agent's `verify(sp)` → optional LLM judge. Each failure throws with a fix-it message so the model can retry. The hard step cap is **30 + 3 nudge** (configurable as constants in `agent.ts`).
+Submission gates: when the model calls `await harness.answer(scratchpad, verify)`, the harness runs (in order):
+
+1. `verify` is a function
+2. **`STRUCTURED_FACTS` (if on):** validate `scratchpad.facts` slot shape and auto-merge every non-null slot's `source` into `scratchpad.refs`
+3. Refs validity — every ref must be in `openedPaths` (or `readSet` under `FEAT_STRICT_REFS`)
+4. `CITING_REASONING` (if on) — every ref needs a ≥ 8-char justification in `scratchpad.refs_why`
+5. Outcome shape (one of the five `OUTCOME_*` names)
+6. `FEAT_GATE_OUTCOME` (if on) — `*_gate=NO/BLOCKED` forbids `OUTCOME_OK`
+7. `FEAT_ALLOWED_OPS` (if on) — `scratchpad.allowed_ops` shape
+8. Agent's `verify(sp)`
+9. Optional LLM judge
+
+Each failure throws with a fix-it message so the model can retry. The hard step cap is **30 + 3 nudge** (configurable as constants in `agent.ts`).
+
+**Reasoning:** agent calls go out with OpenRouter `reasoning: { effort }` (default `medium`; `JUDGE_REASONING_EFFORT` defaults to `low`). When the model returns `message.reasoning`, it's captured per-step alongside token counts and persisted to `runs/<runId>.jsonl`. OpenRouter silently ignores `reasoning` on non-supporting models, so leaving it on is safe.
 
 If the loop exits without calling `harness.answer` (budget exhausted OR uncaught exception), a `try/finally` in `runAgent` submits `OUTCOME_ERR_INTERNAL` directly via `vm.answer` so the trial never returns no-answer.
 
@@ -59,9 +76,10 @@ BitGN's grader runs asynchronously. `endTrial` usually returns `scoreAvailable: 
 1. Awaits every trial's `endTrial` in parallel (CONCURRENCY-bounded)
 2. Calls `submitRun({ force: false })` — retries with `force: true` if BitGN reports unfinished trials (backstop)
 3. `batchFetchScores` polls `getRun` with exponential backoff (3s → 15s, capped at `SCORE_POLL_TIMEOUT_MS` default 5min)
-4. Updates `tasksState.ts` once with all landed scores
+4. For each scored trial, fetches `getTrial(trialId)` to pull `scoreDetail` (the grader's per-trial reasons like `answer missing required reference '/proc/catalog/X.json'`)
+5. Updates `tasksState.ts` and emits a `trial:score` event per task so detail lands in `runs/<runId>.jsonl`
 
-Standalone equivalent: `bun run finalizeRun.ts <runId>` does steps 3–4 only, read-only, against any past or in-flight run.
+Standalone equivalent: `bun run finalizeRun.ts <runId>` does steps 3–5 only, read-only, against any past or in-flight run.
 
 ### Skipped trials
 
@@ -73,11 +91,23 @@ When `tasksState[id].enabled === false` (or `MAX_TASKS` cap is reached), the tri
 
 ### Event bus, logs, web UI
 
-- [events.ts](events.ts) — tiny in-process pub/sub (`bus.emit`, `bus.on`).
+- [events.ts](events.ts) — tiny in-process pub/sub (`bus.emit`, `bus.on`, `bus.replay`); typed `TrialEvent` union.
 - [logs.ts](logs.ts) — writes every event to `runs/<runId>.jsonl`; loads `hints/system.md` (hashed) into the system prompt.
-- [web.ts](web.ts) — Bun HTTP server (default `:3000`) streaming the bus to a live UI.
+- [web.ts](web.ts) — Bun HTTP server (default `:3000`). **Refresh-only** UI — `/api/current` returns `bus.replay()` on demand; no SSE, no polling. Clicking ↻ Refresh pulls a fresh snapshot. The Runs tab lists past runs from `runs/*.jsonl` and replays any of them into the same view.
 
 The `runs/` directory is gitignored and is the canonical record of a run.
+
+#### What lives in `runs/<runId>.jsonl`
+
+Every event is one JSONL line. Notable fields beyond the obvious ones:
+
+- `run:start.envFlags` — every `FEAT_*`, `CITING_REASONING`, `STRUCTURED_FACTS`, `REASONING_EFFORT`, `JUDGE_REASONING_EFFORT`, `JUDGE_ENABLED`, `JUDGE_MODEL` value at run start. **Don't infer what was on from agent behaviour — read this.**
+- `bootstrap` with `tool="system_prompt"` — the full system prompt (incl. workspace tree, preloaded `/docs`, hints, env-hint, scratchpad serialization) the model saw on turn 1.
+- `bootstrap` with `tool="initial_scratchpad"` — the prepopulated scratchpad (`{refs: [], ...}` plus `allowed_ops: []` or `facts: {}` depending on flags).
+- `step` — per-turn: `code`, `output`, `reasoning` (full text from `message.reasoning`), `reasoningTokens`, `completionTokens`, `promptTokens`, `scratchpadAfter` (deep snapshot after the script ran).
+- `trial:score` — `score` + `scoreDetail` (the grader's reasons).
+
+These are the canonical answer to "what did the model see, what did it think, what did it write, what did the grader complain about?" — no guessing, no inference from intent.
 
 ### tasksState
 
