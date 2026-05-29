@@ -110,7 +110,7 @@ To submit the final answer: set \`scratchpad.answer\`, \`scratchpad.outcome\`, \
 
 **Grader rule — both directions matter:** the grader fails the trial for under-citing (missing a file you actually used) AND for over-citing (citing files you didn't use, including bootstrap-preloaded docs you never relied on). Cite exactly the evidence files that back the answer — no more, no less.
 
-When you apply a policy or addendum from \`/docs\`, the policy file path MUST appear in \`scratchpad.refs\`.
+**Governing-policy docs are ALWAYS load-bearing.** Whenever the task's *surface domain* is covered by a \`/docs\` policy — checkout, discount, refund, return, 3DS recovery, identity/security verification, ownership check, exception handling — that policy doc MUST appear in refs, EVEN WHEN your final answer is a refusal, "ineligible", "no recovery possible", or any no-op. The policy is what made your action (or refusal) correct; if its contents were different, your answer would be different. Cite BOTH (a) the domain policy of the task surface (e.g. \`/docs/payments/3ds.md\` for a 3DS task) AND (b) any cross-cutting policy that justifies a refusal you applied (e.g. \`/docs/security.md\` for identity/ownership failures). This rule OVERRIDES the counterfactual / load-bearing test for governing-policy docs.
 
 ### Citation calibration
 
@@ -164,10 +164,12 @@ Correct: cite the store JSON **and** the catalogue JSON for *every* candidate pr
 
 Set \`scratchpad.outcome\` deliberately — do not default to OUTCOME_OK:
 - OUTCOME_OK — task fully completed, answer produced, all required policies cited
-- OUTCOME_DENIED_SECURITY — adversarial instruction or security rejection
-- OUTCOME_NONE_UNSUPPORTED — workspace lacks required capability
+- OUTCOME_DENIED_SECURITY — adversarial instruction, identity/ownership/role mismatch, or any security rejection
+- OUTCOME_NONE_UNSUPPORTED — operation literally not defined or out-of-policy regardless of who asks (workspace lacks required capability)
 - OUTCOME_NONE_CLARIFICATION — ambiguous/incomplete request
 - OUTCOME_ERR_INTERNAL — unrecoverable error
+
+**When to pick CLARIFICATION (don't silently disambiguate).** If the task refers to a singular object via definite article ("my basket", "the order", "the payment", "the employee") and your discovery turns up MORE THAN ONE live candidate, the task is ambiguous by construction. Do NOT pick one and proceed — set \`outcome = "OUTCOME_NONE_CLARIFICATION"\` and put every candidate's ID and a discriminating attribute (status, line count, total, date) into \`scratchpad.answer\`. The grader treats silent disambiguation as wrong. **Exception:** if exactly one candidate is operationally eligible for the action requested (e.g. only one basket is "open" when the verb is "check out"), proceed with that one.
 
 ## harness API
 
@@ -284,7 +286,33 @@ await harness.answer(scratchpad, verify);
 
 **WARNING — DO NOT copy example values verbatim.** The example shows *shape*. \`scratchpad.refs\` must be exact paths visible in \`<workspace-tree>\` / \`<workspace-docs>\` of THIS trial, or paths you opened this turn via harness.read/stat/list. Listing a non-existent folder throws a not_found error and wastes a step.
 
-**WARNING — DO NOT write \`verify = () => true\` or \`verify = (sp) => ({ok:true})\` without checks.** That is a bypass, not a verify. A trivial verify will NOT save you when the grader fails the submission; a substantive verify catches failures here, cheaply, before the judge.`;
+**WARNING — DO NOT write \`verify = () => true\` or \`verify = (sp) => ({ok:true})\` without checks.** That is a bypass, not a verify. A trivial verify will NOT save you when the grader fails the submission; a substantive verify catches failures here, cheaply, before the judge.
+
+## Structured-output tasks (tables, fixed templates)
+
+When the task specifies an output template — a header row + delimited rows, a fixed schema, conditional fields — treat the spec as **exact**:
+
+- **Empty means the literal empty string between delimiters.** If the spec says "leave SKU and in_stock empty if not an exact match", produce \`RowID\\t\\t\\tfalse\` (two tabs in a row), NOT \`RowID\\tnone\\t0\\tfalse\` and NOT a near-match SKU. Filling a field "helpfully" when the spec demands empty is graded as wrong.
+- **Never add a column, never reorder, never substitute a placeholder.**
+- **Encode the conditional in verify(sp).** Parse \`sp.answer\` row-by-row and check each conditional field literally:
+
+\`\`\`js
+const verify = (sp) => {
+  const lines = sp.answer.split("\\n");
+  if (lines[0] !== "RowID\\tSKU\\tin_stock\\tmatch") return { ok: false, reason: "header mismatch" };
+  for (let i = 1; i < lines.length; i++) {
+    const parts = lines[i].split("\\t");
+    if (parts.length !== 4) return { ok: false, reason: \`row \${i} wrong column count\` };
+    const [, sku, inStock, match] = parts;
+    if (match === "false" && (sku !== "" || inStock !== "")) {
+      // If the spec says "leave empty when match=false (no exact catalog product)",
+      // enforce it. Adjust the condition to the task's exact wording.
+      // Note: some specs allow sku+in_stock for match=false when the SKU exists but qty<required.
+    }
+  }
+  return { ok: true };
+};
+\`\`\``;
 
 function buildSystemPrompt(extras: {
   agentsMd: string;
@@ -316,7 +344,7 @@ function buildSystemPrompt(extras: {
         `- **Turn 1:** populate ALL slots the question implies, with \`value: null, source: null, confidence: "pending"\`. This is your commitment to what you're looking for. Slot descriptions must encode the EXACT constraints (brand, fastener_type, diameter, etc.) — not vague labels.\n` +
         `- **Subsequent turns:** as tool calls resolve a slot, set \`value\`, set \`source\` to the exact workspace path that proved it, flip \`confidence\` to "verified". A slot cannot become \`verified\` without a \`source\` path you actually read.\n` +
         `- **Never eyeball** SQL or log output and re-type the value into a code comment. Comments live in disposable code; only \`scratchpad\` survives turns. Promote the value into a slot the moment you have it.\n` +
-        `- **At submit:** \`scratchpad.refs\` automatically merges in every non-null slot's \`source\`. You can still add explicit refs, but the slot sources are guaranteed citations.\n\n` +
+        `- **At submit:** in legacy refs mode, \`scratchpad.refs\` automatically merges in every non-null slot's \`source\`. **Under canonical-citation mode (\`<citation-protocol-canonical>\` present), slot sources are NOT auto-merged** — slots remain useful as a thinking discipline (what facts must I prove?), but you must call \`scratchpad.cite(slot.source, reason)\` explicitly for any slot source you want in refs. Write the reason yourself; do not rely on an auto-generated one.\n\n` +
         `**Example — multi-candidate inventory:**\n` +
         `\`\`\`js\n` +
         `scratchpad.facts = {\n` +
@@ -351,35 +379,39 @@ function buildSystemPrompt(extras: {
         `**Citation in this trial is governed by \`scratchpad.refs_why\` — the ONLY source of truth for refs.**\n\n` +
         `Use \`scratchpad.cite(path, reason)\` to add a citation. It is atomic:\n` +
         `  - \`path\` must be an absolute workspace path you actually read this trial (via \`harness.read\`/\`list\`/\`stat\`/\`write\`/\`delete\`) or a preloaded \`<workspace-docs>\` path.\n` +
-        `  - \`reason\` is a one-line string (≥ 8 non-whitespace chars) explaining why THIS file's content backs the final answer.\n` +
+        `  - \`reason\` is a one-line string (≥ 8 non-whitespace chars) naming the concrete role this file plays in producing your answer (the rule applied, the field consulted, the constraint enforced, the candidate examined).\n` +
         `  - Throws immediately if either rule is violated.\n\n` +
-        `\`scratchpad.refs\` is a DERIVED readonly mirror — populated from \`Object.keys(scratchpad.refs_why)\` at \`harness.answer\` time. Do NOT assign to it directly.\n\n` +
-        `\`scratchpad.answer\` stays clean: literal demanded format only (\`"Total: 2"\`, \`"<YES> FST-XXXX"\`, \`"5 products"\`, \`"<NO>"\`). Justifications live in \`refs_why\`, NEVER in \`answer\`.\n\n` +
-        `**Counterfactual test — apply BEFORE every \`cite()\` call:**\n` +
-        `> "If THIS file had different contents, would my final answer change?"\n` +
-        `> If NO → do NOT cite. The file is search/filter scaffolding, not evidence.\n\n` +
-        `**BitGN rules the judge will enforce against your \`refs_why\` reasons (read /AGENTS.MD for the canonical list):**\n` +
-        `- *Availability questions:* cite ONLY products that ARE available in the answer. NEVER cite a SKU whose inventory is 0 or below threshold, even if you read its catalog while filtering candidates. The reason "0 available" / "below threshold" / "NOT in inventory" / "considered but rejected" is self-incrimination — the judge rejects on those phrases.\n` +
-        `- *Policy-gated answers:* cite the policy doc with a reason naming the rule you applied (e.g. \`"applied 3DS recovery policy step 2"\`).\n` +
-        `- *SQL-derived counts:* the store JSON is the inventory source; per-SKU catalog files are NOT load-bearing for the count unless the SKU appears in the answer.\n\n` +
-        `**Worked example — availability count via SQL:**\n` +
+        `\`scratchpad.refs\` is a DERIVED readonly mirror — populated from \`Object.keys(scratchpad.refs_why)\` at \`harness.answer\` time. Do NOT assign to it directly. Slot \`source\` fields in \`scratchpad.facts\` are NOT auto-merged under this mode — to cite a slot's source, call \`scratchpad.cite(slot.source, reason)\` explicitly.\n\n` +
+        `\`scratchpad.answer\` is a frozen literal in the format the task demands. No narrative, no qualifiers, no parenthetical explanations. Examples: \`"Total: 2"\`, \`"<YES> FST-XXXX"\`, \`"5 products"\`, \`"<NO>"\`. Justifications live in \`refs_why\`, NEVER in \`answer\`.\n\n` +
+        `**Two oracles, not one.** The pre-submission *judge* checks load-bearing reasoning from rules-only context. The *grader* (after submission) checks against a domain-required reference set the judge cannot see. When the judge rejects a ref as "not load-bearing", that is a request to REWRITE the reason — not to remove the file. Removing a file the task actually depends on guarantees a grader 0; a judge rejection is recoverable in-loop.\n\n` +
+        `**What's load-bearing — the rules in priority order:**\n` +
+        `1. **Governing-policy docs (ALWAYS cited regardless of outcome).** If the task's *surface domain* is checkout, discount, refund/return, 3DS recovery, identity/security, ownership check, or exception handling, the \`/docs/*.md\` policy covering that domain is load-bearing even when the answer is "deny", "ineligible", "no recovery possible", or any no-op. The policy is what made your action (or refusal) correct. The counterfactual test does NOT apply to governing-policy docs.\n` +
+        `2. **Cross-cutting refusal policy.** If you refuse on identity/ownership grounds, cite both (a) the domain policy of the task surface AND (b) \`/docs/security.md\` (or the relevant refusal-basis doc).\n` +
+        `3. **Enumerated candidates (ALL of them).** For "how many of THESE…" / "which of THESE…" tasks where the question lists candidate SKUs/IDs, every enumerated candidate's record is load-bearing — including ones the answer excludes (qty 0, attribute mismatch, below threshold). Cite all of them; the count or selection depends on having examined each. Reason like "candidate enumerated in question; examined and excluded (qty 0)" IS load-bearing here.\n` +
+        `4. **Single-record / general-evidence cites.** For everything else, apply the counterfactual test: *"if this file had different contents, would my final answer change?"* If NO → do not cite; it's search/filter scaffolding, not evidence.\n\n` +
+        `**Path canonicality.** \`harness.find\` and \`harness.search\` can return non-canonical alias paths; the grader compares refs by exact string equality. After discovering a path via search/find, call \`harness.read\` on it — the harness emits a \`[harness note]\` if it resolved to a different canonical path, and you must cite the canonical one. If two discovery routes give different paths for the same record, prefer the one reachable via \`tree\`/\`list\` from its parent directory.\n\n` +
+        `**Worked example — multi-candidate inventory at a single store:**\n` +
         `\`\`\`js\n` +
         `const STORE = "/proc/stores/store_bratislava_stare_mesto.json";\n` +
-        `// ... query inventory, filter to available SKUs ...\n` +
-        `const available = [\n` +
-        `  { sku: "FST-1HE3ZSQ6", path: "/proc/catalog/FST-1HE3ZSQ6.json", qty: 4 },\n` +
-        `  { sku: "FST-2JPIIG2S", path: "/proc/catalog/FST-2JPIIG2S.json", qty: 7 },\n` +
+        `// Question enumerated these SKUs explicitly — every one is load-bearing.\n` +
+        `const candidates = [\n` +
+        `  { sku: "FST-1HE3ZSQ6", path: "/proc/catalog/fasteners/anchors_plugs/FST-1HE3ZSQ6.json", qty: 4 },\n` +
+        `  { sku: "FST-2JPIIG2S", path: "/proc/catalog/fasteners/anchors_plugs/FST-2JPIIG2S.json", qty: 7 },\n` +
+        `  { sku: "FST-3HQ9XK21", path: "/proc/catalog/fasteners/anchors_plugs/FST-3HQ9XK21.json", qty: 0 },\n` +
         `];\n` +
-        `scratchpad.answer = \`Total: \${available.length}\`;\n` +
+        `const meeting = candidates.filter((c) => c.qty >= 3);\n` +
+        `scratchpad.answer = "Total: 2";   // frozen literal, not a template\n` +
         `scratchpad.outcome = "OUTCOME_OK";\n\n` +
-        `scratchpad.cite(STORE, "inventory source — available_today_quantity for all candidates at target store");\n` +
-        `for (const p of available) {\n` +
-        `  scratchpad.cite(p.path, \`available product in answer (qty \${p.qty})\`);\n` +
-        `}\n` +
-        `// Candidates with qty 0 are NOT cited — they did not back the answer.\n\n` +
+        `scratchpad.cite(STORE, "inventory source — available_today_quantity for each enumerated candidate");\n` +
+        `for (const c of candidates) {\n` +
+        `  scratchpad.cite(c.path, "candidate enumerated in question; record examined to obtain available_today_quantity");\n` +
+        `}\n\n` +
         `const verify = (sp) => {\n` +
         `  if (!/^Total: \\d+$/.test(sp.answer)) return { ok: false, reason: "answer must be 'Total: <n>'" };\n` +
         `  if (!sp.refs.includes(STORE)) return { ok: false, reason: "store must be cited" };\n` +
+        `  for (const c of candidates) {\n` +
+        `    if (!sp.refs.includes(c.path)) return { ok: false, reason: \`missing enumerated candidate \${c.sku}\` };\n` +
+        `  }\n` +
         `  return { ok: true };\n` +
         `};\n` +
         `await harness.answer(scratchpad, verify);\n` +
@@ -446,28 +478,34 @@ const MAX_JUDGE_ATTEMPTS = 3;
 const JUDGE_BASE_RULES = `1. **Answer format match** — If the task instruction specifies an exact output format (e.g. \`"<COUNT:%d>"\`, \`"<YES>"\`, \`"<NO>"\`), \`scratchpad.answer\` MUST match that format exactly. No prose framing, no quotes that the format does not include, no extra whitespace, no trailing punctuation. A correct numerical value wrapped in prose is a FAIL.
 
 2. **Outcome consistency** — \`scratchpad.outcome\` must be one of: OUTCOME_OK, OUTCOME_DENIED_SECURITY, OUTCOME_NONE_CLARIFICATION, OUTCOME_NONE_UNSUPPORTED, OUTCOME_ERR_INTERNAL.
-   - If ANY top-level scratchpad key has value \`"NO"\` or \`"BLOCKED"\` (string, case-sensitive), \`outcome\` MUST NOT be OUTCOME_OK.
    - OUTCOME_OK requires a non-empty \`scratchpad.answer\`.
 
 3. **Refs shape** — \`scratchpad.refs\` must be an array of strings, each starting with \`/\`. Empty refs are only acceptable when outcome is one of the blocked outcomes (DENIED_SECURITY / NONE_CLARIFICATION / NONE_UNSUPPORTED / ERR_INTERNAL).
 
 4. **Answer present** — If outcome is OUTCOME_OK, \`scratchpad.answer\` must be a non-empty string.`;
 
-const JUDGE_CANONICAL_RULES = `5. **Runtime conventions** — \`runtime_conventions\` (the project's /AGENTS.MD) contains the authoritative citation and answer-format rules. Apply EVERY rule there that fits the proposed scratchpad. In particular, when conventions say "answer should reference products that are available, but should not reference unavailable products" (or similar), enforce it: any cited product SKU whose \`refs_why\` reason indicates unavailability is a violation.
+// Rule 6 — softer than the previous "self-disqualifying language" word-list.
+// We pressure the model to think about WHY each cited file is load-bearing for
+// the answer without phrase-matching for "0 available", "out of stock", etc.
+// (which produced 17 false rejections in the 130320 run).
+const JUDGE_RULE_6 = `5. **Load-bearing citations** — every entry in \`refs_why\` must articulate a concrete, specific role that file's content plays in producing the answer. Reject if:
+   - Any reason is vague or boilerplate ("for context", "background", "scaffolding", "considered", "reference material", "general info") rather than naming what the file contributed.
+   - A reason names a fact that the answer does not actually rely on (e.g. citing a product catalog whose SKU never appears in the answer AND whose existence isn't the load-bearing claim).
+   - A policy doc that the task plainly depends on (security/identity, checkout state, 3DS, refund/return, discount eligibility) is missing from \`refs_why\` when the answer's correctness hinges on that policy. Do NOT enumerate which policies — judge from the task text.
 
-6. **Load-bearing citations** — every entry in \`refs_why\` must back the answer.
-   - **Identifier rule**: if the cited file's path encodes a product SKU or store ID (e.g. \`/proc/catalog/FST-XXXX.json\`, \`/proc/stores/store_x.json\`), that identifier SHOULD appear in \`scratchpad.answer\` — OR the \`refs_why\` reason must explicitly explain a load-bearing role that doesn't require mention (e.g. "store JSON enumerates SKUs in scope" is acceptable).
-   - **Reason rule**: REJECT if any \`refs_why\` reason contains self-disqualifying language indicating the file did NOT back the answer — phrases like "0 available", "below threshold", "candidate", "considered but rejected", "out of stock", "not applicable", "NOT in inventory".`;
+   **Governing-policy doc exemption:** A \`/docs/*.md\` policy whose subject matter is the surface domain of the task is ALWAYS load-bearing — do NOT reject it under this rule, even when the answer is a refusal or no-op. Only reject \`/docs/*.md\` citations whose subject matter is plainly unrelated to the task. If a refs_why reason for a governing-policy doc looks weak, the right outcome is to tell the agent to *strengthen the reason*, not to remove the citation. The agent has been instructed to keep governing-policy docs cited regardless of outcome; do not undermine that.
+
+   **Enumerated-candidate exemption:** For tasks that enumerate candidates by SKU/ID and ask "how many / which of THESE…", every enumerated candidate's record is load-bearing — including ones the answer excludes (qty 0, attribute mismatch, below threshold). Do NOT reject "considered but rejected" / "below threshold" reasoning on candidate-enumeration tasks; the answer's count or selection depends on having examined each one.`;
 
 function buildJudgeSystemPrompt(): string {
-  const canonicalBlock = FEAT_REFS_WHY_CANONICAL ? `\n\n${JUDGE_CANONICAL_RULES}` : "";
+  const ruleSix = FEAT_REFS_WHY_CANONICAL ? `\n\n${JUDGE_RULE_6}` : "";
   return `You are a strict pre-submission auditor for a BitGN ECOM agent.
 
-The agent has prepared a final scratchpad and is about to submit. Your job is to verify it adheres to the operating rules — INDEPENDENTLY of any context the agent had. You see ONLY the task, the runtime conventions (when provided), and the proposed scratchpad. Use only what is visible.
+The agent has prepared a final scratchpad and is about to submit. Your job is to verify it adheres to the operating rules — INDEPENDENTLY of any context the agent had. You see ONLY the task and the proposed scratchpad. Use only what is visible.
 
 Check these rules in order:
 
-${JUDGE_BASE_RULES}${canonicalBlock}
+${JUDGE_BASE_RULES}${ruleSix}
 
 If all rules pass: return \`{"ok": true}\`.
 If any rule fails: return \`{"ok": false, "reason": "<one concrete sentence naming the rule and what's wrong>"}\`.
@@ -483,7 +521,6 @@ async function runJudge(
   judgeModel: string,
   taskInstruction: string,
   scratchpad: Scratchpad,
-  agentsMd: string,
 ): Promise<JudgeVerdict> {
   const refsList = Array.isArray(scratchpad.refs)
     ? (scratchpad.refs as unknown[]).filter((r) => typeof r === "string")
@@ -509,9 +546,6 @@ async function runJudge(
       string_keys: stringKeys,
     },
   };
-  if (FEAT_REFS_WHY_CANONICAL && agentsMd.trim()) {
-    payload.runtime_conventions = agentsMd.trim();
-  }
 
   const messages: ChatMessage[] = [
     { role: "system", content: buildJudgeSystemPrompt() },
@@ -735,8 +769,18 @@ async function callOpenRouter(
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
+// Strip ```json ... ``` / ``` ... ``` fences a model occasionally wraps its JSON
+// in, despite the system prompt saying not to. Cheap robustness — saves entire
+// trials when the model regresses on raw-JSON output.
+function stripJsonFences(content: string): string {
+  const trimmed = content.trim();
+  const fence = /^```(?:json)?\s*\n?([\s\S]*?)\n?```$/i;
+  const m = trimmed.match(fence);
+  return m && typeof m[1] === "string" ? m[1].trim() : trimmed;
+}
+
 function parseNextStep(content: string): NextStep {
-  const obj = JSON.parse(content);
+  const obj = JSON.parse(stripJsonFences(content));
   if (
     typeof obj !== "object" ||
     obj === null ||
@@ -749,16 +793,37 @@ function parseNextStep(content: string): NextStep {
   return obj as NextStep;
 }
 
+type NextStepResult =
+  | { ok: true; step: NextStep; raw: string; llm: LlmCallResult }
+  | { ok: false; raw: string; llm: LlmCallResult | null; error: string };
+
 async function requestNextStep(
   model: string,
   log: ChatMessage[],
-): Promise<{ step: NextStep; raw: string; llm: LlmCallResult }> {
+): Promise<NextStepResult> {
   let attempt: ChatMessage[] = log;
   let lastErr: unknown;
+  let lastRaw = "";
+  let lastLlm: LlmCallResult | null = null;
   for (let i = 0; i < 2; i++) {
-    const llm = await callOpenRouter(model, attempt);
+    let llm: LlmCallResult;
     try {
-      return { step: parseNextStep(llm.content), raw: llm.content, llm };
+      llm = await callOpenRouter(model, attempt);
+    } catch (err) {
+      // OpenRouter itself failed (network, 5xx after retries, timeout). Surface
+      // structured failure so the main loop can emit a visible step event,
+      // re-prompt the model next turn, and stay alive.
+      return {
+        ok: false,
+        raw: lastRaw,
+        llm: lastLlm,
+        error: `OpenRouter call failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+    lastLlm = llm;
+    lastRaw = llm.content;
+    try {
+      return { ok: true, step: parseNextStep(llm.content), raw: llm.content, llm };
     } catch (err) {
       lastErr = err;
       attempt = [
@@ -768,12 +833,17 @@ async function requestNextStep(
           role: "user",
           content: `Your previous response did not validate. Error: ${
             err instanceof Error ? err.message : String(err)
-          }\nReturn corrected JSON only.`,
+          }\nReturn corrected JSON only — no markdown fences, no prose, just the raw JSON object.`,
         },
       ];
     }
   }
-  throw new Error(`NextStep validation failed after retry: ${String(lastErr)}`);
+  return {
+    ok: false,
+    raw: lastRaw,
+    llm: lastLlm,
+    error: `NextStep validation failed after retry: ${String(lastErr)}`,
+  };
 }
 
 const FIND_KIND: Record<"all" | "files" | "dirs", NodeKind> = {
@@ -883,10 +953,6 @@ function collectMdPaths(
 }
 
 const LAZY_MD_BUDGET_BYTES = 50_000;
-// exec is intentionally NOT gated — it's the read-only query path (/bin/sql,
-// /bin/whoami, etc). Gating it broke every task's step 1 in run 9f2733.
-const MUTATION_OPS = ["write", "delete"] as const;
-type MutationOp = (typeof MUTATION_OPS)[number];
 
 // Feature flags — env-driven, default OFF so we can bisect regressions by
 // turning features on one at a time. Set to "true" / "1" / "on" to enable.
@@ -894,30 +960,16 @@ const flagOn = (name: string): boolean => {
   const v = (process.env[name] ?? "").trim().toLowerCase();
   return v === "true" || v === "1" || v === "on" || v === "yes";
 };
-const FEAT_LAZY_MD = flagOn("FEAT_LAZY_MD");                       // Change 4
-const FEAT_READ_BEFORE_MUTATE = flagOn("FEAT_READ_BEFORE_MUTATE"); // Change 5
-const FEAT_AUTO_CITE = flagOn("FEAT_AUTO_CITE");                   // A1(c')
-const FEAT_ALLOWED_OPS = flagOn("FEAT_ALLOWED_OPS");               // A4
-const FEAT_GATE_OUTCOME = flagOn("FEAT_GATE_OUTCOME");             // A3
+const FEAT_LAZY_MD = flagOn("FEAT_LAZY_MD");
+const FEAT_AUTO_CITE = flagOn("FEAT_AUTO_CITE");
 const FEAT_STRICT_REFS = flagOn("FEAT_STRICT_REFS");               // refs ⊆ readSet (vs openedPaths)
 const FEAT_CITING_REASONING = flagOn("CITING_REASONING");          // require scratchpad.refs_why[path] for every ref
 const FEAT_STRUCTURED_FACTS = flagOn("STRUCTURED_FACTS");          // typed slot store: scratchpad.facts[name] = {value, description, source, confidence}; sources auto-promote to refs
-const FEAT_REFS_WHY_CANONICAL = flagOn("FEAT_REFS_WHY_CANONICAL");  // refs_why is source of truth; refs derived; autoCite disabled; judge sees refs_why + AGENTS.MD
+const FEAT_REFS_WHY_CANONICAL = flagOn("FEAT_REFS_WHY_CANONICAL"); // refs_why is source of truth; refs derived; autoCite disabled; judge sees refs_why + AGENTS.MD
 console.log(
-  `[features] LAZY_MD=${FEAT_LAZY_MD} READ_BEFORE_MUTATE=${FEAT_READ_BEFORE_MUTATE} AUTO_CITE=${FEAT_AUTO_CITE} ALLOWED_OPS=${FEAT_ALLOWED_OPS} GATE_OUTCOME=${FEAT_GATE_OUTCOME} STRICT_REFS=${FEAT_STRICT_REFS} CITING_REASONING=${FEAT_CITING_REASONING} STRUCTURED_FACTS=${FEAT_STRUCTURED_FACTS} REFS_WHY_CANONICAL=${FEAT_REFS_WHY_CANONICAL} REASONING_EFFORT=${REASONING_EFFORT} JUDGE_REASONING_EFFORT=${JUDGE_REASONING_EFFORT}`,
+  `[features] LAZY_MD=${FEAT_LAZY_MD} AUTO_CITE=${FEAT_AUTO_CITE} STRICT_REFS=${FEAT_STRICT_REFS} CITING_REASONING=${FEAT_CITING_REASONING} STRUCTURED_FACTS=${FEAT_STRUCTURED_FACTS} REFS_WHY_CANONICAL=${FEAT_REFS_WHY_CANONICAL} REASONING_EFFORT=${REASONING_EFFORT} JUDGE_REASONING_EFFORT=${JUDGE_REASONING_EFFORT}`,
 );
 
-function getAllowedOps(sp: Scratchpad): Set<MutationOp> {
-  const raw = sp.allowed_ops;
-  if (!Array.isArray(raw)) return new Set();
-  const out = new Set<MutationOp>();
-  for (const v of raw as unknown[]) {
-    if (typeof v === "string" && (MUTATION_OPS as readonly string[]).includes(v)) {
-      out.add(v as MutationOp);
-    }
-  }
-  return out;
-}
 
 function ensureRefsArray(sp: Scratchpad): string[] {
   if (!Array.isArray(sp.refs)) sp.refs = [];
@@ -928,59 +980,6 @@ function autoCite(sp: Scratchpad, path: string): void {
   if (FEAT_REFS_WHY_CANONICAL) return; // refs_why owns citations; never auto-push
   const refs = ensureRefsArray(sp);
   if (!refs.includes(path)) refs.push(path);
-}
-
-function checkAllowedOp(sp: Scratchpad, op: MutationOp): void {
-  const allowed = getAllowedOps(sp);
-  if (allowed.has(op)) return;
-  const current = Array.isArray(sp.allowed_ops)
-    ? JSON.stringify(sp.allowed_ops)
-    : "<unset>";
-  throw new Error(
-    `harness.${op} blocked — operation "${op}" not declared in scratchpad.allowed_ops (currently: ${current}).\n\n` +
-      `Before mutating, set scratchpad.allowed_ops to include "${op}". For LOOKUP/REVIEW tasks, leave it []. For WRITE tasks include "write" and/or "delete". For ACTION tasks (transactions, recovery, refund execution), include "exec".\n\n` +
-      `You may re-declare at any time:\n  scratchpad.allowed_ops = ${JSON.stringify([...getAllowedOps(sp), op])};\n` +
-      `Then re-issue the call.`,
-  );
-}
-
-// Soft-block: read the path's current content, throw with content embedded,
-// and add the path to the read set so the model can re-issue next turn.
-async function readBeforeMutateSoftBlock(
-  vm: Client<typeof EcomRuntime>,
-  op: "write" | "delete",
-  path: string,
-  readSet: Set<string>,
-  sp: Scratchpad,
-): Promise<void> {
-  let content: string;
-  let truncated = false;
-  try {
-    const r = await vm.read({ path, number: false, startLine: 0, endLine: 0 });
-    content = r.content ?? "";
-    truncated = r.truncated ?? false;
-  } catch (err) {
-    // For write: path doesn't exist → it's a new file, no precondition needed.
-    if (op === "write") return;
-    // For delete on non-existent path: let the actual delete throw the real error.
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`harness.delete(${path}) failed during read-before-mutate check: ${msg}`);
-  }
-  readSet.add(path);
-  if (FEAT_AUTO_CITE) autoCite(sp, path);
-  const truncNote = truncated ? "\n[content truncated]" : "";
-  const citeNote = FEAT_REFS_WHY_CANONICAL
-    ? "The path is now in your read set. Cite it via scratchpad.cite(path, reason) ONLY if its content backs your final answer."
-    : FEAT_AUTO_CITE
-      ? "The path is now in your read set and auto-cited in scratchpad.refs."
-      : "The path is now in your read set (cite it manually in scratchpad.refs if the answer relies on it).";
-  throw new Error(
-    `harness.${op}(${path}) soft-blocked — path was not read this trial. ` +
-      `You should know what you're about to ${op === "write" ? "overwrite" : "delete"}.\n\n` +
-      `--- current content of ${path} ---\n${content}${truncNote}\n--- end ---\n\n` +
-      `${citeNote} ` +
-      `Re-issue \`harness.${op}({ path: "${path}"${op === "write" ? ', content: "..." ' : ""} })\` next turn if you still intend to proceed.`,
-  );
 }
 
 // Scan structured harness responses for *.md paths the model might want to read.
@@ -1134,27 +1133,50 @@ function buildHarness(
         startLine: args.start_line ?? 0,
         endLine: args.end_line ?? 0,
       });
-      openedPaths.add(args.path);
-      readSet.add(args.path);
-      if (FEAT_AUTO_CITE) autoCite(scratchpad, args.path);
-      return { content: res.content ?? "", truncated: res.truncated ?? false };
+      // The BitGN catalog is heavily nested (/proc/catalog/<category>/<sub>/SKU.json).
+      // The runtime resolves flat /proc/catalog/SKU.json aliases successfully, but
+      // the grader compares refs by exact string equality against the canonical
+      // nested path. Detect a flat catalog read, find the canonical path, and
+      // surface it so the model cites the right string.
+      let effectivePath = args.path;
+      let canonicalNote = "";
+      if (/^\/proc\/catalog\/[^/]+\.json$/.test(args.path)) {
+        const basename = args.path.split("/").pop()!;
+        try {
+          const fr = await vm.find({
+            root: "/proc/catalog",
+            name: basename,
+            kind: NodeKind.FILE,
+            limit: 2,
+          });
+          const matches = (fr.paths ?? []).filter((p) => p.endsWith("/" + basename));
+          if (matches.length === 1 && matches[0] !== args.path) {
+            effectivePath = matches[0]!;
+            canonicalNote =
+              `\n\n[harness note] You read "${args.path}" but the canonical workspace path is "${effectivePath}". ` +
+              `The runtime resolves the alias, but the grader checks refs by exact string equality. ` +
+              `Cite the canonical path; the alias has NOT been added to your read set.`;
+          }
+        } catch {
+          // find failed — leave effectivePath as-is. STRICT_REFS will still catch
+          // it if the alias is non-canonical and the grader rejects it.
+        }
+      }
+      openedPaths.add(effectivePath);
+      readSet.add(effectivePath);
+      if (FEAT_AUTO_CITE) autoCite(scratchpad, effectivePath);
+      return {
+        content: (res.content ?? "") + canonicalNote,
+        truncated: res.truncated ?? false,
+      };
     },
     async write(args) {
-      if (FEAT_ALLOWED_OPS) checkAllowedOp(scratchpad, "write");
-      if (FEAT_READ_BEFORE_MUTATE && !readSet.has(args.path)) {
-        // Soft-block: if path exists, surface content; if new, allowed.
-        await readBeforeMutateSoftBlock(vm, "write", args.path, readSet, scratchpad);
-      }
       await vm.write({ path: args.path, content: args.content });
       openedPaths.add(args.path);
       readSet.add(args.path);
       if (FEAT_AUTO_CITE) autoCite(scratchpad, args.path);
     },
     async delete(args) {
-      if (FEAT_ALLOWED_OPS) checkAllowedOp(scratchpad, "delete");
-      if (FEAT_READ_BEFORE_MUTATE && !readSet.has(args.path)) {
-        await readBeforeMutateSoftBlock(vm, "delete", args.path, readSet, scratchpad);
-      }
       await vm.delete({ path: args.path });
       openedPaths.add(args.path);
       if (FEAT_AUTO_CITE) autoCite(scratchpad, args.path);
@@ -1174,6 +1196,11 @@ function buildHarness(
         args: args.args ?? [],
         stdin: args.stdin ?? "",
       });
+      // exec'd binaries are legitimate evidence sources (e.g. /bin/id for
+      // identity in DENIED_SECURITY answers). Treat a successful exec like a
+      // read so STRICT_REFS lets the model cite the binary it ran.
+      openedPaths.add(args.path);
+      readSet.add(args.path);
       return {
         stdout: res.stdout ?? "",
         stderr: res.stderr ?? "",
@@ -1226,19 +1253,11 @@ function buildHarness(
               `\n\nFix the slots, then re-call harness.answer. Slots with value=null and confidence="pending" are tolerated (they signal unresolved questions).`,
           );
         }
-        if (FEAT_REFS_WHY_CANONICAL) {
-          // Auto-promote slot sources into refs_why with a generated reason.
-          // Model can override by calling scratchpad.cite() with a better reason BEFORE submit.
-          const why = (scratchpad.refs_why && typeof scratchpad.refs_why === "object"
-            ? (scratchpad.refs_why as Record<string, string>)
-            : ((scratchpad.refs_why = {} as Record<string, string>), scratchpad.refs_why as Record<string, string>));
-          for (const { path, factName } of autoRefs) {
-            if (!why[path]) {
-              why[path] = `source for fact "${factName}" — load-bearing evidence for the answer`;
-            }
-          }
-        } else {
-          // Legacy: merge slot sources directly into refs (deduped) BEFORE refs validity check.
+        if (!FEAT_REFS_WHY_CANONICAL) {
+          // Legacy mode: merge slot sources directly into refs (deduped) BEFORE refs validity check.
+          // Under canonical mode the auto-merge is disabled — the model must explicitly call
+          // scratchpad.cite(slot.source, reason) so that refs_why reasons are model-authored
+          // and load-bearing, not auto-generated boilerplate the judge rejects as vague.
           const refsList = Array.isArray(scratchpad.refs) ? (scratchpad.refs as unknown[]) : [];
           const merged = new Set<string>();
           for (const r of refsList) if (typeof r === "string") merged.add(r);
@@ -1289,13 +1308,16 @@ function buildHarness(
       }
 
       // 2. Refs validity — strict (readSet) when FEAT_STRICT_REFS, else loose (openedPaths).
+      //    URI fragments (`#row=X`, `?q=...`) are stripped before membership check
+      //    because some grader-mandated ref formats anchor into a file we already read.
       const refsRaw = scratchpad.refs;
       const refs = Array.isArray(refsRaw)
         ? (refsRaw as unknown[]).filter((r): r is string => typeof r === "string")
         : [];
       const allowedSet = FEAT_STRICT_REFS ? readSet : openedPaths;
       const allowedList = [...allowedSet].sort();
-      const badRefs = refs.filter((r) => !allowedSet.has(r));
+      const stripFragment = (r: string): string => r.replace(/[#?].*$/, "");
+      const badRefs = refs.filter((r) => !allowedSet.has(stripFragment(r)));
       if (badRefs.length > 0) {
         throw new Error(
           `harness.answer rejected — grounding_refs cite paths you never opened in this trial:\n` +
@@ -1357,41 +1379,6 @@ function buildHarness(
         throw new Error(
           `harness.answer rejected — scratchpad.outcome must be one of ${OUTCOME_NAMES.join(", ")}; got ${JSON.stringify(outcomeName)}`,
         );
-      }
-
-      // 3a. Gate-vs-outcome consistency (A3) — any *_gate = NO/BLOCKED forbids OUTCOME_OK
-      if (FEAT_GATE_OUTCOME && outcomeName === "OUTCOME_OK") {
-        for (const [k, v] of Object.entries(scratchpad)) {
-          if (!k.endsWith("_gate")) continue;
-          if (v === "NO" || v === "BLOCKED") {
-            throw new Error(
-              `harness.answer rejected — gate "${k}" = ${JSON.stringify(v)} but outcome = "OUTCOME_OK".\n\n` +
-                `If a gate is NO/BLOCKED, the outcome cannot be OK. Either:\n` +
-                `  - flip outcome to OUTCOME_DENIED_SECURITY (security/authorization failure)\n` +
-                `  - flip outcome to OUTCOME_NONE_CLARIFICATION (ambiguous request)\n` +
-                `  - flip outcome to OUTCOME_NONE_UNSUPPORTED (capability missing)\n` +
-                `  - re-examine the gate — if it was set in error, change it to "YES" before re-submitting.`,
-            );
-          }
-        }
-      }
-
-      // 3b. allowed_ops shape (A4) — if set, must be array of valid op names
-      const allowedRaw = scratchpad.allowed_ops;
-      if (FEAT_ALLOWED_OPS && allowedRaw !== undefined) {
-        if (!Array.isArray(allowedRaw)) {
-          throw new Error(
-            `harness.answer rejected — scratchpad.allowed_ops must be an array of strings; got ${JSON.stringify(allowedRaw)}.\n\nSet it to [] for LOOKUP/REVIEW or ["write","delete"] (subset) for tasks that mutate files. exec is always free and does not need declaration.`,
-          );
-        }
-        const bad = (allowedRaw as unknown[]).filter(
-          (v) => typeof v !== "string" || !(MUTATION_OPS as readonly string[]).includes(v as string),
-        );
-        if (bad.length > 0) {
-          throw new Error(
-            `harness.answer rejected — scratchpad.allowed_ops contains invalid entries: ${JSON.stringify(bad)}.\n\nAllowed values: ${JSON.stringify(MUTATION_OPS)}.`,
-          );
-        }
       }
 
       // 4. Agent's verify(sp) — deterministic, runs before LLM judge
@@ -1515,6 +1502,8 @@ const MAX_PRIMARY_STEPS = 30;
 const NUDGE_EXTRA_STEPS = 3;
 const BUDGET_WARNING_AT_REMAINING = 5;
 const MAX_VALIDATION_RETRIES = 1;
+const MAX_SYNTAX_REFUNDS = 3;
+const MAX_RECOVERY_REFUNDS = 3;
 
 async function preloadContext(
   vm: Client<typeof EcomRuntime>,
@@ -1648,7 +1637,6 @@ export async function runAgent(
 
   const scratchpad: Scratchpad = {
     refs: [],
-    ...(FEAT_ALLOWED_OPS ? { allowed_ops: [] } : {}),
     ...(FEAT_STRUCTURED_FACTS ? { facts: {} } : {}),
   };
 
@@ -1706,10 +1694,16 @@ export async function runAgent(
       return;
     }
     judgeAttempts++;
-    const verdict = await runJudge(taskId, judgeAttempts, judgeModel, taskText, sp, agentsMd);
+    const verdict = await runJudge(taskId, judgeAttempts, judgeModel, taskText, sp);
     if (!verdict.ok) {
       throw new Error(
-        `pre-submission judge rejected (attempt ${judgeAttempts}/${MAX_JUDGE_ATTEMPTS}): ${verdict.reason ?? "no reason given"}\n\nFix scratchpad to address the reason above, then call await harness.answer(scratchpad) again. The judge sees the task, runtime conventions (/AGENTS.MD), and the proposed scratchpad — make sure the answer format, outcome, refs, and refs_why match the task's literal requirements AND the conventions.`,
+        `pre-submission judge rejected (attempt ${judgeAttempts}/${MAX_JUDGE_ATTEMPTS}): ${verdict.reason ?? "no reason given"}\n\n` +
+          `HOW TO INTERPRET THIS REJECTION — read carefully:\n` +
+          `  - If the judge says a refs_why entry is "vague" or "not load-bearing", that is a request to REWRITE the reason to name the concrete role that file plays. It is NOT a request to remove the ref. Removing a file the answer actually depends on guarantees a grader 0.\n` +
+          `  - Keep every file you read because it gates the answer (policy docs in /docs, identity sources like /bin/id, record JSONs in /proc). Rewrite each reason to spell out what that file contributed: the rule applied, the field consulted, the constraint enforced.\n` +
+          `  - Only DROP a ref if you can honestly say: "if this file had different contents, my final answer would not change". Otherwise keep it and improve its reason.\n` +
+          `  - If a required policy doc is missing from refs_why, ADD it (cite via scratchpad.cite) with a reason naming the rule from that doc you applied.\n` +
+          `  - Then re-call \`await harness.answer(scratchpad, verify)\`.`,
       );
     }
   };
@@ -1818,6 +1812,8 @@ export async function runAgent(
   let budgetWarningSent = false;
   let nudgeSent = false;
   let stepBudget = MAX_PRIMARY_STEPS;
+  let syntaxRefunds = 0;
+  let recoveryRefunds = 0;
 
   try {
   while (stepCounter < stepBudget) {
@@ -1839,8 +1835,53 @@ export async function runAgent(
     log[0] = { role: "system", content: rebuildSystemPrompt() };
 
     const startedAt = Date.now();
-    const { step, raw, llm } = await requestNextStep(model, log);
+    const res = await requestNextStep(model, log);
     const elapsedMs = Date.now() - startedAt;
+
+    if (!res.ok) {
+      // requestNextStep already retried internally. Emit a visible step event
+      // (so silent ERR_INTERNAL is debuggable), push a corrective user message,
+      // refund the step (capped) and continue — give the model another turn
+      // instead of dying to the no-answer gate on transient stumbles.
+      bus.emit({
+        type: "step",
+        taskId,
+        step: stepIdx,
+        tool: "execute",
+        planFirst: "next-step request failed",
+        input: { code: "" },
+        output: res.raw,
+        outputBytes: Buffer.byteLength(res.raw, "utf8"),
+        latencyMs: elapsedMs,
+        ok: false,
+        errorMessage: res.error,
+        reasoning: res.llm?.reasoning,
+        reasoningTokens: res.llm?.reasoningTokens,
+        completionTokens: res.llm?.completionTokens,
+        promptTokens: res.llm?.promptTokens,
+        ts: Date.now(),
+      });
+      console.log(`${CLI.red}requestNextStep failed: ${res.error}${CLI.clr}`);
+
+      // Append a recovery prompt so the model sees its bad output + a fix-it
+      // hint next turn. Refund the budget so a transient parse blip doesn't
+      // eat real steps — but cap to prevent runaway when the model is stuck.
+      if (res.raw) log.push({ role: "assistant", content: res.raw });
+      log.push({
+        role: "user",
+        content: `Your previous response could not be parsed (${res.error}). Return raw JSON only — no markdown fences, no prose framing. Continue the task from where you were.`,
+      });
+      if (recoveryRefunds < MAX_RECOVERY_REFUNDS) {
+        recoveryRefunds++;
+        stepCounter--;
+        console.log(
+          `${CLI.yellow}RECOVERY (${recoveryRefunds}/${MAX_RECOVERY_REFUNDS}): refunding step ${stepIdx}${CLI.clr}`,
+        );
+      }
+      continue;
+    }
+
+    const { step, raw, llm } = res;
 
     const codePreview =
       step.code.length > 200 ? step.code.slice(0, 200) + "…" : step.code;
@@ -1902,6 +1943,22 @@ export async function runAgent(
       for (const ref of Array.isArray(scratchpad.refs) ? (scratchpad.refs as unknown[]) : [])
         console.log(`- ${CLI.blue}${String(ref)}${CLI.clr}`);
       return;
+    }
+
+    // SyntaxError refund — the model produced unparseable JS. The error is in
+    // result.error AND in `outputText` (which the model sees next turn). Refund
+    // the step so a pure code-gen stumble doesn't eat into the budget. Capped
+    // at MAX_SYNTAX_REFUNDS per task to prevent runaway loops on a stuck model.
+    if (
+      result.error &&
+      result.error.startsWith("SyntaxError:") &&
+      syntaxRefunds < MAX_SYNTAX_REFUNDS
+    ) {
+      syntaxRefunds++;
+      stepCounter--;
+      console.log(
+        `${CLI.yellow}SYNTAX REFUND (${syntaxRefunds}/${MAX_SYNTAX_REFUNDS}): not consuming step ${stepIdx}${CLI.clr}`,
+      );
     }
 
     // Drain any *.md paths the model surfaced this turn; their content lands in

@@ -54,16 +54,15 @@ Only `code` is executed — it's JavaScript run in a Bun `AsyncFunction` sandbox
 Submission gates: when the model calls `await harness.answer(scratchpad, verify)`, the harness runs (in order):
 
 1. `verify` is a function
-2. **`STRUCTURED_FACTS` (if on):** validate `scratchpad.facts` slot shape and auto-merge every non-null slot's `source` into `scratchpad.refs`
-3. Refs validity — every ref must be in `openedPaths` (or `readSet` under `FEAT_STRICT_REFS`)
-4. `CITING_REASONING` (if on) — every ref needs a ≥ 8-char justification in `scratchpad.refs_why`
-5. Outcome shape (one of the five `OUTCOME_*` names)
-6. `FEAT_GATE_OUTCOME` (if on) — `*_gate=NO/BLOCKED` forbids `OUTCOME_OK`
-7. `FEAT_ALLOWED_OPS` (if on) — `scratchpad.allowed_ops` shape
-8. Agent's `verify(sp)`
-9. Optional LLM judge
+2. **`STRUCTURED_FACTS` (if on):** validate `scratchpad.facts` slot shape. Under legacy refs mode, also auto-merge every non-null slot's `source` into `scratchpad.refs`; under `FEAT_REFS_WHY_CANONICAL` mode the auto-merge is disabled — model must explicitly call `scratchpad.cite(slot.source, reason)`.
+3. **`FEAT_REFS_WHY_CANONICAL` (if on):** validate `scratchpad.refs_why` keys are absolute paths with ≥ 8-char reasons; derive `scratchpad.refs` from `Object.keys(refs_why)`.
+4. Refs validity — every ref must be in `openedPaths` (or `readSet` under `FEAT_STRICT_REFS`). URI fragments (`path#row=X`, `path?q=…`) are stripped before this check.
+5. `CITING_REASONING` (if on, non-canonical mode) — every ref needs a ≥ 8-char justification in `scratchpad.refs_why`.
+6. Outcome shape (one of the five `OUTCOME_*` names).
+7. Agent's `verify(sp)`.
+8. Optional LLM judge (rules 1-4 always; rule 6 "load-bearing citations" under canonical mode, with governing-policy-doc + enumerated-candidate exemptions).
 
-Each failure throws with a fix-it message so the model can retry. The hard step cap is **30 + 3 nudge** (configurable as constants in `agent.ts`).
+Each failure throws with a fix-it message so the model can retry. The hard step cap is **30 + 3 nudge** (configurable as constants in `agent.ts`). `SyntaxError` in the sandbox is refunded from the step budget (capped at 3 refunds/task). `requestNextStep` parse/OpenRouter failures emit a visible `step` event, refund the budget, and reprompt the model — capped at `MAX_RECOVERY_REFUNDS = 3`.
 
 **Reasoning:** agent calls go out with OpenRouter `reasoning: { effort }` (default `medium`; `JUDGE_REASONING_EFFORT` defaults to `low`). When the model returns `message.reasoning`, it's captured per-step alongside token counts and persisted to `runs/<runId>.jsonl`. OpenRouter silently ignores `reasoning` on non-supporting models, so leaving it on is safe.
 
@@ -103,7 +102,7 @@ Every event is one JSONL line. Notable fields beyond the obvious ones:
 
 - `run:start.envFlags` — every `FEAT_*`, `CITING_REASONING`, `STRUCTURED_FACTS`, `REASONING_EFFORT`, `JUDGE_REASONING_EFFORT`, `JUDGE_ENABLED`, `JUDGE_MODEL` value at run start. **Don't infer what was on from agent behaviour — read this.**
 - `bootstrap` with `tool="system_prompt"` — the full system prompt (incl. workspace tree, preloaded `/docs`, hints, env-hint, scratchpad serialization) the model saw on turn 1.
-- `bootstrap` with `tool="initial_scratchpad"` — the prepopulated scratchpad (`{refs: [], ...}` plus `allowed_ops: []` or `facts: {}` depending on flags).
+- `bootstrap` with `tool="initial_scratchpad"` — the prepopulated scratchpad (`{refs: [], ...}` plus `facts: {}` or `refs_why: {}` depending on flags).
 - `step` — per-turn: `code`, `output`, `reasoning` (full text from `message.reasoning`), `reasoningTokens`, `completionTokens`, `promptTokens`, `scratchpadAfter` (deep snapshot after the script ran).
 - `trial:score` — `score` + `scoreDetail` (the grader's reasons).
 

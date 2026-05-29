@@ -21,7 +21,16 @@ const BITGN_URL =
 const BITGN_API_KEY = process.env.BITGN_API_KEY ?? "";
 const BENCH_ID = process.env.BENCH_ID ?? process.env.BENCHMARK_ID ?? "bitgn/ecom1-dev";
 const MODEL_ID = process.env.MODEL_ID ?? "z-ai/glm-5.1";
+// MIN_TASKS / MAX_TASKS are inclusive bounds on the numeric task index parsed
+// from the task id (t05 → 5). Defaults: no lower bound, no upper bound.
+// argv-supplied task ids (e.g. `bun run main.ts t13 t38`) override this range.
+const MIN_TASKS = process.env.MIN_TASKS ? Number(process.env.MIN_TASKS) : -Infinity;
 const MAX_TASKS = process.env.MAX_TASKS ? Number(process.env.MAX_TASKS) : Infinity;
+
+function taskIndex(taskId: string): number | null {
+  const m = /(\d+)/.exec(taskId);
+  return m ? Number(m[1]) : null;
+}
 const WEB_PORT = process.env.WEB_PORT ? Number(process.env.WEB_PORT) : 3000;
 const CONCURRENCY = Math.max(
   1,
@@ -165,11 +174,9 @@ async function main(): Promise<void> {
     const hints = loadHints();
     const envFlags = {
       FEAT_LAZY_MD: process.env.FEAT_LAZY_MD ?? "",
-      FEAT_READ_BEFORE_MUTATE: process.env.FEAT_READ_BEFORE_MUTATE ?? "",
       FEAT_AUTO_CITE: process.env.FEAT_AUTO_CITE ?? "",
-      FEAT_ALLOWED_OPS: process.env.FEAT_ALLOWED_OPS ?? "",
-      FEAT_GATE_OUTCOME: process.env.FEAT_GATE_OUTCOME ?? "",
       FEAT_STRICT_REFS: process.env.FEAT_STRICT_REFS ?? "",
+      FEAT_REFS_WHY_CANONICAL: process.env.FEAT_REFS_WHY_CANONICAL ?? "",
       CITING_REASONING: process.env.CITING_REASONING ?? "",
       STRUCTURED_FACTS: process.env.STRUCTURED_FACTS ?? "",
       REASONING_EFFORT: process.env.REASONING_EFFORT ?? "",
@@ -226,28 +233,38 @@ async function main(): Promise<void> {
 
     try {
       const sem = new Semaphore(CONCURRENCY);
-      let executed = 0;
       console.log(`${CLI.blue}Concurrency: ${CONCURRENCY}${CLI.clr}`);
+      if (Number.isFinite(MIN_TASKS) || Number.isFinite(MAX_TASKS)) {
+        console.log(
+          `${CLI.blue}Task range: ${Number.isFinite(MIN_TASKS) ? MIN_TASKS : "-∞"}..${Number.isFinite(MAX_TASKS) ? MAX_TASKS : "∞"}${CLI.clr}`,
+        );
+      }
 
-      const shouldRunTask = (taskId: string): boolean => {
-        if (argvFilter.size > 0) return argvFilter.has(taskId);
+      // Returns a skip-reason string when the task should be skipped, or null
+      // when it should run. Pure function of taskId — no shared mutable state,
+      // so safe under concurrent acquires.
+      const skipReason = (taskId: string): string | null => {
+        if (argvFilter.size > 0) {
+          return argvFilter.has(taskId) ? null : "not in argv filter";
+        }
+        const idx = taskIndex(taskId);
+        if (idx !== null && idx < MIN_TASKS) return `below MIN_TASKS=${MIN_TASKS}`;
+        if (idx !== null && idx > MAX_TASKS) return `above MAX_TASKS=${MAX_TASKS}`;
         const s = taskStateMap[taskId];
-        return !s || s.enabled;
+        if (s && !s.enabled) return "disabled in tasksState.ts";
+        return null;
       };
 
       const trialJobs = run.trialIds.map((trialId) => async () => {
         await sem.acquire();
         try {
           const trial = await client.startTrial({ trialId });
-          if (executed >= MAX_TASKS || !shouldRunTask(trial.taskId)) {
+          const skip = skipReason(trial.taskId);
+          if (skip) {
             // CRITICAL: must endTrial even when skipping — leaving trials open
             // makes BitGN reject submitRun. We don't update tasksState here
             // (preserves lastScore for tasks we chose not to re-run).
-            const reason =
-              executed >= MAX_TASKS
-                ? `MAX_TASKS=${MAX_TASKS} cap reached`
-                : "disabled in tasksState.ts";
-            console.log(`${CLI.blue}[${trial.taskId}] closing trial (${reason})${CLI.clr}`);
+            console.log(`${CLI.blue}[${trial.taskId}] closing trial (${skip})${CLI.clr}`);
             try {
               await client.endTrial({ trialId: trial.trialId });
             } catch (err) {
@@ -255,7 +272,6 @@ async function main(): Promise<void> {
             }
             return;
           }
-          executed++;
           const tag = `[${trial.taskId}]`;
 
           console.log(`${"=".repeat(20)} ${tag} START ${"=".repeat(20)}`);
