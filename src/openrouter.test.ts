@@ -4,6 +4,7 @@ import {
   isRetryableErr,
   extractResult,
   callOpenRouter,
+  callOpenRouterOnce,
   RetryableHttpError,
 } from "./openrouter";
 import type { OpenRouterConfig } from "./config";
@@ -132,5 +133,44 @@ describe("callOpenRouter retry loop", () => {
       }),
     ).rejects.toThrow(RetryableHttpError);
     expect(calls).toBe(3);
+  });
+});
+
+describe("callOpenRouterOnce timeout", () => {
+  // Regression: the timeout must guard the BODY read, not just the headers.
+  // A provider that returns 200 headers then stalls mid-body (the t092 hang on
+  // 2026-05-30) previously hung forever because clearTimeout fired before
+  // res.json(). The abort signal is bound to the response stream, so aborting
+  // must reject the in-flight body read and surface a retryable timeout error.
+  test("aborts a stalled body read and throws a retryable timeout", async () => {
+    const realFetch = globalThis.fetch;
+    const fastCfg: OpenRouterConfig = { ...cfg, timeoutMs: 20 };
+    // Headers resolve immediately; json() never resolves until the signal aborts.
+    globalThis.fetch = ((_url: string, init?: RequestInit) => {
+      const signal = init?.signal;
+      return Promise.resolve({
+        ok: true,
+        json: () =>
+          new Promise((_resolve, reject) => {
+            signal?.addEventListener("abort", () => {
+              const e = new Error("The operation was aborted.");
+              (e as { name: string }).name = "AbortError";
+              reject(e);
+            });
+          }),
+        text: () => Promise.resolve(""),
+      } as unknown as Response);
+    }) as typeof fetch;
+    try {
+      const err = await callOpenRouterOnce("m", msgs, "off", fastCfg).catch(
+        (e) => e as Error,
+      );
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toMatch(/timed out after 20ms/);
+      // and the surfaced error is retryable, so the loop will retry not die
+      expect(isRetryableErr(err)).toBe(true);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 });

@@ -14,7 +14,6 @@ import {
   loadState,
   updateTaskState,
   persistState,
-  selectTasks,
   computeSummary,
 } from "./tasksStateIO";
 
@@ -135,6 +134,20 @@ async function batchFetchScores(
     return collect(r.trials);
   } catch {
     return [];
+  }
+}
+
+// Audible "run finished" cue. macOS-only (afplay), non-blocking, errors
+// swallowed — a missing sound file or non-darwin host must never break a run.
+// Silence with RUN_END_SOUND=0.
+function playEndChime() {
+  if (process.platform !== "darwin") return;
+  if (process.env.RUN_END_SOUND === "0") return;
+  const sound = process.env.RUN_END_SOUND_FILE ?? "/System/Library/Sounds/Glass.aiff";
+  try {
+    Bun.spawn(["afplay", sound], { stdout: "ignore", stderr: "ignore" });
+  } catch {
+    // no-op: cosmetic only
   }
 }
 
@@ -379,6 +392,7 @@ async function main(): Promise<void> {
   unsubscribe();
   writer.close();
   console.log(`${CLI.blue}Saved run to runs/${runId}.jsonl${CLI.clr}`);
+  playEndChime();
 
   if (web) {
     console.log(`${CLI.blue}Web UI still running at ${web.url} (Ctrl-C to exit)${CLI.clr}`);

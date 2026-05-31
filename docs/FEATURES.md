@@ -30,6 +30,7 @@ These are the flags that **exist in the current codebase** (`src/config.ts`):
 | `FEAT_STRUCTURED_FACTS` (alias `STRUCTURED_FACTS`) | Typed slot store: `scratchpad.facts[name] = {value, description, source, confidence}`. Sources auto-promote to `refs` (legacy mode only). | off | system prompt, scratchpad init, `answer` validation |
 | `FEAT_REFS_WHY_CANONICAL` | `scratchpad.refs_why` becomes the **only** citation channel; `refs` is derived; `scratchpad.cite(path, reason)` is the API; auto-cite disabled | off | system prompt, `scratchpad.cite` injection, `answer` derive+validation |
 | `FEAT_DEBUG_REF_PROBE` | Run the diagnostic ref-alias probe on submission (logs every on-disk path each cited `.json` resolves to) | off | `harness.answer` (diagnostic only — never blocks) |
+| `FEAT_NAV_HINTS` | Append the `<navigation-hardening>` system-prompt block (real SQL schema, "empty result ≠ absence", attribute matching, inventory `on_hand`/`available_today`/`incoming` semantics, action-vs-refusal discipline) | off | system prompt (`buildSystemPrompt`) |
 
 > ⚠️ **Not implemented.** Earlier drafts of this doc described `FEAT_READ_BEFORE_MUTATE`, `FEAT_ALLOWED_OPS`, and `FEAT_GATE_OUTCOME`. **None of these exist in the current codebase** — they are not parsed in `src/config.ts` and setting them has no effect. Their design sections below are retained as historical design notes, clearly banner-flagged, in case they're revived. The flag-bisection orchestrator's defaults were corrected to stop referencing them.
 

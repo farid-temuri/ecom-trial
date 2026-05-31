@@ -32,7 +32,11 @@ const MAX_PRIMARY_STEPS = 35;
 const NUDGE_EXTRA_STEPS = 5;
 const BUDGET_WARNING_AT_REMAINING = 5;
 const MAX_SYNTAX_REFUNDS = 3;
-const MAX_RECOVERY_REFUNDS = 3;
+// Recovery refunds re-issue the whole requestNextStep on an LLM/parse failure.
+// Each one nests over callOpenRouter's own attempts, so this is a time
+// multiplier on a stuck task — kept low (2) so a dead request fails fast and
+// submits OUTCOME_ERR_INTERNAL rather than wedging the run's tail.
+const MAX_RECOVERY_REFUNDS = 2;
 const LAZY_MD_BUDGET_BYTES = 50_000;
 
 type NextStepResult =

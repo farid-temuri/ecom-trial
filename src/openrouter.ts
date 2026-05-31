@@ -100,7 +100,7 @@ export function extractResult(data: OpenRouterResponse): LlmCallResult {
   };
 }
 
-async function callOpenRouterOnce(
+export async function callOpenRouterOnce(
   model: string,
   messages: ChatMessage[],
   effort: ReasoningEffort,
@@ -108,7 +108,6 @@ async function callOpenRouterOnce(
 ): Promise<LlmCallResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.timeoutMs);
-  let res: Response;
   const body: Record<string, unknown> = {
     model,
     messages,
@@ -117,8 +116,14 @@ async function callOpenRouterOnce(
   if (effort !== "off") {
     body.reasoning = { effort };
   }
+  // The AbortController must guard the WHOLE request — fetch (headers) AND the
+  // body read (res.json()/res.text()). A provider that returns 200 headers then
+  // stalls mid-body would otherwise hang forever, because the abort signal is
+  // bound to the response stream: clearing the timer before reading the body
+  // (the previous bug) left the body read with no timeout. Keep the timer live
+  // until every read completes; aborting rejects an in-flight body read too.
   try {
-    res = await fetch(config.url, {
+    const res = await fetch(config.url, {
       method: "POST",
       signal: controller.signal,
       headers: {
@@ -127,6 +132,14 @@ async function callOpenRouterOnce(
       },
       body: JSON.stringify(body),
     });
+    if (!res.ok) {
+      const text = await res.text();
+      if (OPENROUTER_RETRY_STATUSES.has(res.status)) {
+        throw new RetryableHttpError(res.status, text);
+      }
+      throw new Error(`OpenRouter ${res.status}: ${text}`);
+    }
+    return extractResult((await res.json()) as OpenRouterResponse);
   } catch (err) {
     if ((err as { name?: string })?.name === "AbortError") {
       throw new Error(`OpenRouter timed out after ${config.timeoutMs}ms`);
@@ -135,14 +148,6 @@ async function callOpenRouterOnce(
   } finally {
     clearTimeout(timer);
   }
-  if (!res.ok) {
-    const text = await res.text();
-    if (OPENROUTER_RETRY_STATUSES.has(res.status)) {
-      throw new RetryableHttpError(res.status, text);
-    }
-    throw new Error(`OpenRouter ${res.status}: ${text}`);
-  }
-  return extractResult((await res.json()) as OpenRouterResponse);
 }
 
 export type RetryDeps = {

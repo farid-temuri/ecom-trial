@@ -47,7 +47,7 @@ The former monolithic `agent.ts` was decomposed into focused, individually-teste
 - [src/gates.ts](src/gates.ts) — the submission gates as **pure functions** + `runSubmissionGates`.
 - [src/harness.ts](src/harness.ts) — `buildHarness` factory (typed wrapper over the `EcomRuntime` RPC) + `autoCite` + the diagnostic ref-alias probe.
 - [src/openrouter.ts](src/openrouter.ts) — typed OpenRouter client (no `any`), retry/backoff, `makeOpenRouterClient`/`LlmClient`.
-- [src/prompt.ts](src/prompt.ts) — `SYSTEM_PROMPT_BASE`, feature blocks, `buildSystemPrompt` (builder with a memoized feature-head). **Locked by [src/prompt.test.ts](src/prompt.test.ts)** — edit the prompt and update the hash in the same commit.
+- [src/prompt.ts](src/prompt.ts) — `SYSTEM_PROMPT_BASE`, feature blocks, `buildSystemPrompt` (builder with a memoized feature-head). **Locked by [src/prompt.test.ts](src/prompt.test.ts)** — edit the prompt and update the hash in the same commit. The `FEAT_NAV_HINTS` `<navigation-hardening>` block holds run-analysis corrections that OVERRIDE the illustrative examples above it: real SQL schema, product-attribute matching, checkout/refusal outcome discipline, dispatch-wave route/profit schema, always-cite subject+governing-doc, positive-proof-before-ownership-refusal, and `on_hand`/`available_today`/`incoming` inventory semantics. Add new corrections there (not the base prose), keep each fact verified against logged run data, and bump the nav-hints hash.
 - [src/preload.ts](src/preload.ts) — `preloadContext`. [src/sandbox.ts](src/sandbox.ts) — `executeScript`. [src/parse.ts](src/parse.ts), [src/format.ts](src/format.ts), [src/types.ts](src/types.ts), [src/cli.ts](src/cli.ts), [src/util.ts](src/util.ts) — leaf helpers.
 
 ### Agent loop (`src/loop.ts`)
@@ -75,7 +75,7 @@ Submission gates ([src/gates.ts](src/gates.ts), composed by `runSubmissionGates`
 7. Agent's `verify(sp)`.
 8. Deterministic answer-format gate — every token in `scratchpad.literal_tokens` must appear verbatim in `scratchpad.answer` (no-op if the slot is empty). This replaced the former pre-submission LLM judge, which was removed: across 19 instrumented runs it showed no grader-score lift (rejected-then-accepted ≈ pass-first-try), a ~32% false-negative rate concentrated in refs errors, and ~24s/call latency on every submission. Its substantive guidance already lived in the system-prompt citation protocol; its structural checks are covered by gates 1–7.
 
-Each failure throws with a fix-it message so the model can retry. The hard step cap is `MAX_PRIMARY_STEPS` (35) **+ `NUDGE_EXTRA_STEPS` (5) nudge** (constants in [src/loop.ts](src/loop.ts)). `SyntaxError` in the sandbox is refunded from the step budget (capped at 3 refunds/task). `requestNextStep` parse/OpenRouter failures emit a visible `step` event, refund the budget, and reprompt the model — capped at `MAX_RECOVERY_REFUNDS = 3`.
+Each failure throws with a fix-it message so the model can retry. The hard step cap is `MAX_PRIMARY_STEPS` (35) **+ `NUDGE_EXTRA_STEPS` (5) nudge** (constants in [src/loop.ts](src/loop.ts)). `SyntaxError` in the sandbox is refunded from the step budget (capped at 3 refunds/task). `requestNextStep` parse/OpenRouter failures emit a visible `step` event, refund the budget, and reprompt the model — capped at `MAX_RECOVERY_REFUNDS = 2`.
 
 **Reasoning:** agent calls go out with OpenRouter `reasoning: { effort }` (default `medium`). When the model returns `message.reasoning`, it's captured per-step alongside token counts and persisted to `runs/<runId>.jsonl`. OpenRouter silently ignores `reasoning` on non-supporting models, so leaving it on is safe.
 
@@ -135,6 +135,6 @@ No vendored proto. TypeScript types and clients come from the Buf npm registry p
 ## Conventions
 
 - Keep `main.ts` benchmark-agnostic and the `src/` modules task-logic-only — do not push task logic into the control plane or harness setup into the control plane. Feature flags belong in `src/config.ts`; gate logic in `src/gates.ts`; prompt text in `src/prompt.ts` (and update its snapshot test when you change it).
-- The 30-step cap, no-answer fallback, and skipped-trial closure are load-bearing for the ECOM benchmark — do not change without a deliberate reason.
+- The step cap (`MAX_PRIMARY_STEPS = 35` + `NUDGE_EXTRA_STEPS = 5`), no-answer fallback, and skipped-trial closure are load-bearing for the ECOM benchmark — do not change without a deliberate reason.
 - Never call `submitRun({ force: true })` while trials are still legitimately running. `force: true` kills in-flight trials and grades them 0. It is the right call only on Ctrl-C, on the backstop retry after `force: false` is refused, or on a confirmed-stuck trial.
 - `tasksState.ts` is the source of truth for which tasks to run. Manual edits to `enabled` are safe between runs and won't be clobbered by the writer.

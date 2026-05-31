@@ -15,6 +15,7 @@ function baseConfig(over: Partial<Config["features"]> = {}): Config {
       structuredFacts: false,
       refsWhyCanonical: false,
       debugRefProbe: false,
+      navHints: false,
       ...over,
     },
     reasoningEffort: "off",

@@ -4,6 +4,71 @@ A TypeScript / Bun agent that runs the [BitGN](https://bitgn.com) **ECOM** bench
 
 Every event (steps, reasoning, scratchpad state, system prompt, grader detail) is written to `runs/<runId>.jsonl`. A web UI (refresh-only — no SSE) browses the current run and every past one in the same view.
 
+## Architecture
+
+One model. One tool. A loop that won't let it submit ungrounded.
+
+```mermaid
+flowchart LR
+    TASK["Task"] --> AGENT
+    subgraph AGENT["Agent loop"]
+        direction LR
+        LLM["LLM<br/>(thinks, writes code)"] -->|code| SANDBOX["Sandbox<br/>(runs code, reads the store)"]
+        SANDBOX -->|results| LLM
+    end
+    AGENT -->|answer| GATES{"Gates<br/>grounded?"}
+    GATES -->|"no — fix it"| AGENT
+    GATES -->|yes| ANSWER["Answer"]
+```
+
+The model drives a JavaScript sandbox through a single `execute_script` tool: it
+writes code, the code reads the e-commerce store, results come back, repeat. When it
+tries to answer, deterministic **gates** reject anything that isn't grounded in data
+it actually read — and hand back a fix-it message so it can retry.
+
+<details>
+<summary>Full system view (control plane, runtime, gates, logging)</summary>
+
+```mermaid
+flowchart TB
+    subgraph CP["Control plane — main.ts (benchmark-agnostic)"]
+        direction TB
+        S["startRun"] --> T["per trial: startTrial → runAgent → endTrial"]
+        T --> SUB["submitRun"] --> POLL["poll deferred scores"] --> ST["persist tasksState"]
+    end
+
+    subgraph RT["Per-trial runtime — src/"]
+        direction TB
+        SP["preload + system prompt"] --> LOOP{"step loop<br/>≤ 35 steps"}
+        LOOP -->|"code"| LLM["OpenRouter LLM"]
+        LLM --> VM["Bun sandbox<br/>harness · scratchpad · console"]
+        VM -->|"output"| LOOP
+        LOOP -->|"harness.answer(scratchpad, verify)"| GATES
+    end
+
+    subgraph GATES["Submission gates — src/gates.ts"]
+        direction TB
+        G["refs ⊆ what was read · citations justified ·<br/>outcome ∈ 5 classes · verify(sp) · literal tokens present"]
+    end
+
+    T -.drives.-> RT
+    GATES -->|reject + fix-it| LOOP
+    GATES -->|pass| GRADE["BitGN grader (deferred)"]
+    GRADE -.scores.-> POLL
+    RT & CP -.emit.-> EV["event bus → runs/&lt;runId&gt;.jsonl → web UI"]
+```
+
+Two Connect-RPC surfaces: a benchmark-agnostic **control plane** ([main.ts](main.ts))
+owning the run lifecycle, and a per-trial **runtime** ([src/](src/)) where the agent
+loop runs. Gate order and details: [src/gates.ts](src/gates.ts). Every event is
+mirrored to `runs/<runId>.jsonl`.
+
+</details>
+
+## Results
+
+Top-20 on the **`bitgn/ecom1-prod`** blind leaderboard ([run-22RxPyYQ4dtnsaeKdXpRsJ6ce](https://eu.bitgn.com/runs/run-22RxPyYQ4dtnsaeKdXpRsJ6ce)) with a **single open-weight model** (`xiaomi/mimo-v2.5-pro`) and a **single `execute_script` tool** — no planner, router, or judge. The leaderboard config is the default in [.env.example](.env.example) (`REASONING_EFFORT=low`, citation gates on). Architecture write-up: [docs/insights-submission/](docs/insights-submission/).
+
 ## Requirements
 
 - [Bun](https://bun.sh) `>= 1.1`
@@ -69,7 +134,7 @@ bun run finalizeRun.ts <runId>   # read-only; pulls scores via getRun and update
 |---|---|---|
 | `OPENROUTER_API_KEY` | — | **Required.** Used to call OpenRouter. |
 | `BITGN_API_KEY` | — | **Required** for `bitgn/ecom1-dev`. |
-| `MODEL_ID` | `z-ai/glm-5.1` | Any model id supported by OpenRouter. |
+| `MODEL_ID` | `z-ai/glm-5.1` | Any model id supported by OpenRouter. `.env.example` ships the leaderboard champion `xiaomi/mimo-v2.5-pro` (single open-weight model, no planner/router/judge). |
 | `BENCH_ID` / `BENCHMARK_ID` | `bitgn/ecom1-dev` | Override the benchmark. |
 | `BITGN_HOST` / `BENCHMARK_HOST` | `https://api.bitgn.com` | Override the harness endpoint. |
 | `MAX_TASKS` | (no cap) | Stop after this many *enabled* tasks have run. Skipped tasks still get cleanly closed. |
@@ -77,9 +142,9 @@ bun run finalizeRun.ts <runId>   # read-only; pulls scores via getRun and update
 | `HINT` | — | Appended to the system prompt after `hints/system.md`. |
 | `OPENROUTER_TIMEOUT_MS` | `90000` | Per-request timeout. Retried on 408/425/429/5xx with exponential backoff. |
 | `SCORE_POLL_TIMEOUT_MS` | `300000` | Max time to poll `getRun` for deferred scores after submission. |
-| `REASONING_EFFORT` | `medium` | OpenRouter `reasoning.effort` passed on agent calls (`low` / `medium` / `high` / `off`). Silently ignored by non-reasoning models. |
+| `REASONING_EFFORT` | `medium` | OpenRouter `reasoning.effort` passed on agent calls (`low` / `medium` / `high` / `off`). Silently ignored by non-reasoning models. The champion run used `low`, which outscored `medium` on dev. |
 | `WEB_PORT` | `3000` | `0` to disable the web UI. |
-| `FEAT_*` flags | `false` | Experimental harness behavior flags, parsed in [src/config.ts](src/config.ts). Canonical names: `FEAT_LAZY_MD`, `FEAT_AUTO_CITE`, `FEAT_STRICT_REFS`, `FEAT_CITING_REASONING`, `FEAT_STRUCTURED_FACTS`, `FEAT_REFS_WHY_CANONICAL`, `FEAT_DEBUG_REF_PROBE`. `CITING_REASONING` and `STRUCTURED_FACTS` are accepted as back-compat aliases. "On" = `true`/`1`/`on`/`yes`. See [docs/FEATURES.md](docs/FEATURES.md). |
+| `FEAT_*` flags | `false` | Experimental harness behavior flags, parsed in [src/config.ts](src/config.ts). Canonical names: `FEAT_LAZY_MD`, `FEAT_AUTO_CITE`, `FEAT_STRICT_REFS`, `FEAT_CITING_REASONING`, `FEAT_STRUCTURED_FACTS`, `FEAT_REFS_WHY_CANONICAL`, `FEAT_DEBUG_REF_PROBE`, `FEAT_NAV_HINTS`. `CITING_REASONING` and `STRUCTURED_FACTS` are accepted as back-compat aliases. "On" = `true`/`1`/`on`/`yes`. See [docs/FEATURES.md](docs/FEATURES.md). |
 
 ## tasksState.ts
 

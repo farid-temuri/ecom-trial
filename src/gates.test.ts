@@ -23,6 +23,7 @@ function feats(overrides: Partial<Features> = {}): Features {
     structuredFacts: false,
     refsWhyCanonical: false,
     debugRefProbe: false,
+    navHints: false,
     ...overrides,
   };
 }

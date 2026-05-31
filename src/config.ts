@@ -23,6 +23,13 @@ export type Features = {
   refsWhyCanonical: boolean;
   /** Run the diagnostic ref-alias probe on submission (FEAT_DEBUG_REF_PROBE). */
   debugRefProbe: boolean;
+  /**
+   * Append the navigation-hardening prompt block (FEAT_NAV_HINTS) — real SQL
+   * schema, product-attribute matching, checkout outcome discipline, cite-what-
+   * you-derived, and answer/cite consistency. Distilled from the 2026-05-30
+   * run-failure analysis; A/B-gated so its grader impact can be measured.
+   */
+  navHints: boolean;
 };
 
 export type OpenRouterConfig = {
@@ -74,8 +81,12 @@ function numberOr(raw: string | undefined, fallback: number): number {
 
 const OPENROUTER_DEFAULT_URL =
   "https://openrouter.ai/api/v1/chat/completions";
-const OPENROUTER_DEFAULT_TIMEOUT_MS = 90_000;
-const OPENROUTER_MAX_ATTEMPTS = 3;
+// 75s sits just above real model latency (p95 ≈ 48s for mimo) so a legitimately
+// slow response still lands, while a stalled request is cut quickly. Combined
+// with maxAttempts=2 and MAX_RECOVERY_REFUNDS (loop.ts), this bounds the worst
+// case for a single hung task to a few minutes instead of ~18 (the t092 hang).
+const OPENROUTER_DEFAULT_TIMEOUT_MS = 75_000;
+const OPENROUTER_DEFAULT_MAX_ATTEMPTS = 2;
 
 export function loadFeatures(env: Env): Features {
   return {
@@ -90,6 +101,7 @@ export function loadFeatures(env: Env): Features {
     ),
     refsWhyCanonical: parseBool(env.FEAT_REFS_WHY_CANONICAL),
     debugRefProbe: parseBool(env.FEAT_DEBUG_REF_PROBE),
+    navHints: parseBool(env.FEAT_NAV_HINTS),
   };
 }
 
@@ -104,7 +116,10 @@ export function loadConfig(env: Env = process.env): Config {
         env.OPENROUTER_TIMEOUT_MS,
         OPENROUTER_DEFAULT_TIMEOUT_MS,
       ),
-      maxAttempts: OPENROUTER_MAX_ATTEMPTS,
+      maxAttempts: numberOr(
+        env.OPENROUTER_MAX_ATTEMPTS,
+        OPENROUTER_DEFAULT_MAX_ATTEMPTS,
+      ),
     },
   };
 }

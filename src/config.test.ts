@@ -51,13 +51,14 @@ describe("loadConfig", () => {
       structuredFacts: false,
       refsWhyCanonical: false,
       debugRefProbe: false,
+      navHints: false,
     });
     expect(c.reasoningEffort).toBe("medium");
     expect(c.openrouter.url).toBe(
       "https://openrouter.ai/api/v1/chat/completions",
     );
-    expect(c.openrouter.timeoutMs).toBe(90_000);
-    expect(c.openrouter.maxAttempts).toBe(3);
+    expect(c.openrouter.timeoutMs).toBe(75_000);
+    expect(c.openrouter.maxAttempts).toBe(2);
     expect(c.openrouter.apiKey).toBe("");
   });
 
@@ -70,6 +71,7 @@ describe("loadConfig", () => {
       FEAT_STRUCTURED_FACTS: "true",
       FEAT_REFS_WHY_CANONICAL: "true",
       FEAT_DEBUG_REF_PROBE: "true",
+      FEAT_NAV_HINTS: "true",
     });
     expect(c.features).toEqual({
       lazyMd: true,
@@ -79,6 +81,7 @@ describe("loadConfig", () => {
       structuredFacts: true,
       refsWhyCanonical: true,
       debugRefProbe: true,
+      navHints: true,
     });
   });
 
@@ -110,8 +113,13 @@ describe("loadConfig", () => {
     expect(c.openrouter.timeoutMs).toBe(12_345);
   });
 
+  test("reads OPENROUTER_MAX_ATTEMPTS override", () => {
+    const c = loadConfig({ OPENROUTER_MAX_ATTEMPTS: "4" });
+    expect(c.openrouter.maxAttempts).toBe(4);
+  });
+
   test("ignores a non-numeric OPENROUTER_TIMEOUT_MS and keeps the default", () => {
     const c = loadConfig({ OPENROUTER_TIMEOUT_MS: "not-a-number" });
-    expect(c.openrouter.timeoutMs).toBe(90_000);
+    expect(c.openrouter.timeoutMs).toBe(75_000);
   });
 });
