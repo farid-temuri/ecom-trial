@@ -1,0 +1,72 @@
+- generic [ref=e2]:
+  - generic [ref=e3]: BitGN · ECOM1 · The Cited Sandbox
+  - heading "One model. One tool. A loop that won't let it submit ungrounded." [level=1] [ref=e4]
+  - generic [ref=e5]:
+    - text: A single open-weight model drives a JavaScript sandbox through one
+    - code [ref=e6]: execute_script
+    - text: tool — and deterministic gates reject any answer not grounded in data it actually read.
+  - generic [ref=e7]:
+    - generic [ref=e8]:
+      - generic [ref=e9]: Task
+      - generic [ref=e10]: one ECOM1 trial
+    - generic [ref=e12]: →
+    - generic [ref=e13]:
+      - generic [ref=e14]: Agent loop · ≤ 35 steps
+      - generic [ref=e15]:
+        - generic [ref=e16]:
+          - generic [ref=e17]: 🧠 LLM
+          - generic [ref=e18]:
+            - text: thinks, writes code
+            - text: mimo-v2.5-pro · effort=low
+        - generic [ref=e19]:
+          - generic [ref=e20]: ⇄
+          - generic [ref=e21]: code ↓ results ↑
+        - generic [ref=e22]:
+          - generic [ref=e23]: 📦 Sandbox
+          - generic [ref=e24]:
+            - text: runs code, reads the store
+            - text: harness · scratchpad · console
+    - generic [ref=e25]:
+      - generic [ref=e26]: →
+      - generic [ref=e27]: answer
+    - generic [ref=e28]:
+      - generic [ref=e29]: Submission gates
+      - generic [ref=e30]: ⛓ Grounded?
+      - generic [ref=e31]: 8 deterministic checks
+    - generic [ref=e32]:
+      - generic [ref=e33]: →
+      - generic [ref=e34]: pass
+    - generic [ref=e35]:
+      - generic [ref=e36]: ✓ Answer
+      - generic [ref=e37]: graded by BitGN
+  - generic [ref=e38]:
+    - generic [ref=e39]: ↺ reject + fix-it message
+    - generic [ref=e40]: — a failed gate hands the model a repair hint and the loop continues
+  - generic [ref=e41]:
+    - generic [ref=e42]:
+      - heading "Control plane" [level=3] [ref=e43]: Control plane
+      - paragraph [ref=e45]:
+        - text: Benchmark-agnostic.
+        - code [ref=e46]: startRun → startTrial → runAgent → endTrial → submitRun
+        - text: ", then polls deferred scores. Zero task logic."
+    - generic [ref=e47]:
+      - heading "Per-trial runtime" [level=3] [ref=e48]: Per-trial runtime
+      - paragraph [ref=e50]:
+        - text: Fresh sandbox per trial. The model writes JS;
+        - code [ref=e51]: exec
+        - text: is a real shell — SQL, grep, JSON catalogues, the filesystem.
+    - generic [ref=e52]:
+      - heading "The gates" [level=3] [ref=e53]: The gates
+      - paragraph [ref=e55]:
+        - text: Refs ⊆ what was read · each citation justified · outcome ∈ 5 classes · agent
+        - code [ref=e56]: verify(sp)
+        - text: · literal tokens present.
+    - generic [ref=e57]:
+      - heading "Total logging" [level=3] [ref=e58]: Total logging
+      - paragraph [ref=e60]:
+        - text: Every step — code, output, reasoning, scratchpad snapshot, grader detail — to
+        - code [ref=e61]: runs/<id>.jsonl
+        - text: .
+  - generic [ref=e62]:
+    - generic [ref=e63]: Top-20 · bitgn/ecom1-prod · run-22RxPyYQ4dtnsaeKdXpRsJ6ce
+    - generic [ref=e64]: ◇ all open-weight models
